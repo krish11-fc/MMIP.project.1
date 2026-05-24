@@ -1,0 +1,24 @@
+# Reproducibility repository for InertialTNRD paper
+
+# ── Outputs / generated files ──
+checkpoints/
+outputs/
+__pycache__/
+*.pyc
+*.pth
+*.log
+nohup.out
+
+# ── Data (download separately) ──
+data/
+data.zip
+
+# ── Git / OS ──
+.DS_Store
+Thumbs.db
+
+# ── Misc ──
+*.swp
+*.swo
+*~
+.env
