@@ -4,7 +4,7 @@ import torch, torch.nn as nn, torch.optim as optim
 from torch.optim.lr_scheduler import StepLR
 from skimage.metrics import structural_similarity as sk_ssim
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 from config import (
     DEVICE, NUM_STAGES, BATCH_SIZE, PATCH_SIZE,
     NUM_EPOCHS, LR, LR_STEP, LR_GAMMA_SCHED, WEIGHT_DECAY, GRAD_CLIP,

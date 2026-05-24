@@ -1,7 +1,7 @@
 """
-train_tnrd_log.py — Train TNRD-Log (log-transformed, first-order diffusion).
-Greedy stage-wise training in log domain.
-Checkpoints saved with _tnrdlog suffix.
+train_learn_k.py — Train LearnK variant (learnable filters k_i + gamma).
+Greedy stage-wise training, identical schedule to train.py.
+Checkpoints saved with _learnk suffix.
 """
 import os, sys, json, time, argparse
 import numpy as np
@@ -11,21 +11,23 @@ import torch.optim as optim
 from torch.optim.lr_scheduler import StepLR
 from skimage.metrics import structural_similarity as sk_ssim
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 from config import (
     DEVICE, NUM_STAGES, BATCH_SIZE, PATCH_SIZE,
     NUM_EPOCHS, LR, LR_STEP, LR_GAMMA_SCHED, WEIGHT_DECAY, GRAD_CLIP,
     CLEAN_TRAIN_DIR, CLEAN_VAL_DIR,
     CHECKPOINT_DIR, PLOT_DIR,
+    GAMMA_INERTIA, SIGMA_SMOOTH, NU, K,
     NUM_FILTERS, FILTER_SIZE, RBF_NUM_CENTERS,
     RBF_CENTER_MIN, RBF_CENTER_MAX,
     DATALOADER_NUM_WORKERS, VAL_MAX_IMAGES,
 )
-from models import TNRDLogNetwork
+from models import LearnKInertialTNRDNetwork
 from dataset import make_train_loader, make_val_loader
+from utils.visualization import plot_loss_curve, plot_psnr_curve, plot_influence_functions
 
 _WARMUP_EPOCHS = 3
-SUFFIX = "_tnrdlog"
+SUFFIX = "_learnk"
 
 
 def _psnr255(pred, target):
@@ -47,19 +49,14 @@ def _ssim255(pred, target):
 
 def train_one_epoch(model, loader, optimizer, device, active_stages):
     model.train()
+    criterion = nn.MSELoss()
     total_loss = 0.0
     for u_gt, f in loader:
         u_gt = u_gt.to(device)
         f = f.to(device)
         optimizer.zero_grad()
-
-        # Forward in log domain
-        z_gt = torch.log(1.0 + u_gt)
-        z = torch.log(1.0 + f)
-        z_pred, _ = model(f, active_stages=active_stages)
-
-        # MSE loss in log domain
-        loss = nn.MSELoss()(z_pred, z_gt)
+        u_pred, _ = model(f, active_stages=active_stages)
+        loss = criterion(u_pred, u_gt)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(
             [p for p in model.parameters() if p.requires_grad], max_norm=GRAD_CLIP)
@@ -101,7 +98,7 @@ def train_stage(model, stage_idx, train_loader, val_loader, device,
     n_trainable = sum(p.numel() for p in trainable)
 
     print(f"\n{'='*60}")
-    print(f"  [TNRD-Log] Stage {stage_idx+1}/{base.T}  |  L={L}")
+    print(f"  [LearnK] Stage {stage_idx+1}/{base.T}  |  L={L}")
     print(f"  trainable params: {n_trainable:,}  |  epochs={num_epochs}")
     print(f"{'='*60}")
 
@@ -172,7 +169,7 @@ def _find_resume_stage(L, num_stages, save_dir=CHECKPOINT_DIR):
     return next_stage_idx, ckpt_path
 
 
-def train_greedy(L=1, num_stages=min(NUM_STAGES, 5), num_epochs=NUM_EPOCHS,
+def train_greedy(L=1, num_stages=NUM_STAGES, num_epochs=NUM_EPOCHS,
                  device=DEVICE, save_dir=CHECKPOINT_DIR, plot_dir=PLOT_DIR,
                  num_workers=None, multi_gpu=True, resume=False):
     if num_workers is None:
@@ -189,15 +186,16 @@ def train_greedy(L=1, num_stages=min(NUM_STAGES, 5), num_epochs=NUM_EPOCHS,
         load_path = None
 
     print(f"\n{'#'*60}")
-    print(f"  TNRD-LOG TRAINING  L={L}  T={num_stages}")
+    print(f"  FULL-LEARN TRAINING  L={L}  T={num_stages}")
     if resume:
         print(f"  RESUME from stage {start_stage+1}")
-    print(f"  Log-transform + first-order diffusion (no inertia, no g-func)")
+    print(f"  Learnable: k_i (filters), γ, φ_i (RBF), λ^t")
     print(f"{'#'*60}")
 
-    model = TNRDLogNetwork(
-        num_stages=num_stages, num_filters=NUM_FILTERS,
-        filter_size=FILTER_SIZE, num_centers=RBF_NUM_CENTERS, device=device,
+    model = LearnKInertialTNRDNetwork(
+        num_stages=num_stages, num_filters=NUM_FILTERS, filter_size=FILTER_SIZE,
+        gamma_init=GAMMA_INERTIA, sigma_smooth=SIGMA_SMOOTH, nu=NU,
+        K_thresh=K, num_centers=RBF_NUM_CENTERS, use_g_func=True, device=device,
     ).to(device)
 
     if load_path is not None:
@@ -242,10 +240,11 @@ def train_greedy(L=1, num_stages=min(NUM_STAGES, 5), num_epochs=NUM_EPOCHS,
     print(f"\n  Final model → {final_path}")
     return model, old_hist
 
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--L", type=int, default=1)
-    parser.add_argument("--stages", type=int, default=min(NUM_STAGES, 5))
+    parser.add_argument("--stages", type=int, default=NUM_STAGES)
     parser.add_argument("--epochs", type=int, default=NUM_EPOCHS)
     parser.add_argument("--both", action="store_true")
     parser.add_argument("--workers", type=int, default=None)
@@ -263,9 +262,8 @@ def main():
     os.makedirs(PLOT_DIR, exist_ok=True)
 
     if args.pipeline:
-        stages_map = {1: 10, 10: 5}
         for L in [1, 10]:
-            ns = min(stages_map.get(L, args.stages), NUM_STAGES)
+            ns = 10 if L == 1 else min(args.stages, 5)
             train_greedy(L=L, num_stages=ns, num_epochs=args.epochs,
                           device=device, num_workers=args.workers,
                           multi_gpu=not args.no_multi_gpu, resume=True)
