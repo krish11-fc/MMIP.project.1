@@ -1,6 +1,12 @@
 """
-train_full_learn.py — Train FullLearn variant (learnable filters + gamma).
-Greedy stage-wise training, identical schedule to train.py.
+train_full_learn.py — Train Full-Learn variant: all PDE scalars + RBF learnable.
+
+Same greedy stage-wise training as train.py, but uses FullLearnInertialTNRDNetwork
+where K, γ, τ, ν, σ are nn.Parameters (trained alongside RBF φ_i).
+
+Filters k_i stay frozen (fixed DCT bank).
+All 5 PDE scalars + RBF + λ are learned per stage.
+
 Checkpoints saved with _fulllearn suffix.
 """
 import os, sys, json, time, argparse
@@ -21,6 +27,7 @@ from config import (
     NUM_FILTERS, FILTER_SIZE, RBF_NUM_CENTERS,
     RBF_CENTER_MIN, RBF_CENTER_MAX,
     DATALOADER_NUM_WORKERS, VAL_MAX_IMAGES,
+    CURRICULUM_L1_SCHEDULE,
 )
 from models import FullLearnInertialTNRDNetwork
 from dataset import make_train_loader, make_val_loader
@@ -59,7 +66,8 @@ def train_one_epoch(model, loader, optimizer, device, active_stages):
         loss = criterion(u_pred, u_gt)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(
-            [p for p in model.parameters() if p.requires_grad], max_norm=GRAD_CLIP)
+            [p for p in model.parameters() if p.requires_grad],
+            max_norm=GRAD_CLIP)
         optimizer.step()
         total_loss += loss.item()
     return total_loss / max(len(loader), 1)
@@ -90,15 +98,14 @@ def train_stage(model, stage_idx, train_loader, val_loader, device,
     os.makedirs(save_dir, exist_ok=True)
     os.makedirs(plot_dir, exist_ok=True)
 
-    base = model.module if isinstance(model, nn.DataParallel) else model
-    base.freeze_stages(up_to=stage_idx)
-    base.unfreeze_stage(stage_idx)
+    model.freeze_stages(up_to=stage_idx)
+    model.unfreeze_stage(stage_idx)
 
     trainable = [p for p in model.parameters() if p.requires_grad]
     n_trainable = sum(p.numel() for p in trainable)
 
     print(f"\n{'='*60}")
-    print(f"  [FullLearn] Stage {stage_idx+1}/{base.T}  |  L={L}")
+    print(f"  [FullLearn] Stage {stage_idx+1}/{model.T}  |  L={L}")
     print(f"  trainable params: {n_trainable:,}  |  epochs={num_epochs}")
     print(f"{'='*60}")
 
@@ -106,9 +113,9 @@ def train_stage(model, stage_idx, train_loader, val_loader, device,
     scheduler = StepLR(optimizer, step_size=LR_STEP, gamma=LR_GAMMA_SCHED)
     active = stage_idx + 1
 
-    history = {"train_loss": [], "train_psnr": [], "val_psnr": [], "val_ssim": []}
+    history = {"train_loss": [], "val_psnr": [], "val_ssim": []}
     best_psnr = -1.0
-    best_epoch = -1
+    best_path = None
 
     for epoch in range(1, num_epochs + 1):
         t0 = time.time()
@@ -118,41 +125,56 @@ def train_stage(model, stage_idx, train_loader, val_loader, device,
             _set_lr(optimizer, lr)
 
         train_loss = train_one_epoch(model, train_loader, optimizer, device, active)
-        train_psnr_val = 10.0 * np.log10(255.0 ** 2 / max(train_loss, 1e-10))
-        val_psnr_val, val_ssim_val = validate(model, val_loader, device, active)
+        val_psnr, val_ssim = validate(model, val_loader, device, active)
 
         if epoch > _WARMUP_EPOCHS:
             scheduler.step()
 
         history["train_loss"].append(train_loss)
-        history["train_psnr"].append(train_psnr_val)
-        history["val_psnr"].append(val_psnr_val)
-        history["val_ssim"].append(val_ssim_val)
+        history["val_psnr"].append(val_psnr)
+        history["val_ssim"].append(val_ssim)
 
-        cur_lr = optimizer.param_groups[0]["lr"]
-        print(f"  Ep [{epoch:3d}/{num_epochs}]  loss={train_loss:.4f}  "
-              f"tPSNR≈{train_psnr_val:.2f}dB  vPSNR={val_psnr_val:.2f}dB  "
-              f"vSSIM={val_ssim_val:.4f}  lr={cur_lr:.2e}  ({time.time()-t0:.1f}s)")
+        # Log scalars every epoch
+        params_str = ""
+        stage = model.stages[stage_idx]
+        params_str = (f"  γ={stage.gamma.item():.4f}  τ={stage.tau.item():.4f}  "
+                      f"K={stage.K_thresh.item():.1f}  ν={stage.nu.item():.4f}  "
+                      f"σ={stage.sigma.item():.4f}")
 
-        if val_psnr_val > best_psnr:
-            best_psnr = val_psnr_val
+        print(f"  ep={epoch:3d}/{num_epochs}  loss={train_loss:.2f}  "
+              f"val_psnr={val_psnr:.4f}  val_ssim={val_ssim:.4f}  "
+              f"lr={optimizer.param_groups[0]['lr']:.2e}  "
+              f"time={time.time()-t0:.1f}s{params_str}")
+
+        # Save best checkpoint
+        if val_psnr > best_psnr:
+            best_psnr = val_psnr
             best_epoch = epoch
-            base.save(os.path.join(save_dir, f"stage{stage_idx+1}_L{L}{SUFFIX}_best.pth"))
+            save_path = os.path.join(
+                save_dir,
+                f"stage{stage_idx+1}_L{L}_best{SUFFIX}.pth")
+            torch.save(model.state_dict(), save_path)
+            best_path = save_path
+            print(f"  *** New best val PSNR: {val_psnr:.4f} (ep {epoch}) → {save_path}")
 
-    print(f"\n  Best val PSNR = {best_psnr:.2f} dB at epoch {best_epoch}")
-    base.save(os.path.join(save_dir, f"stage{stage_idx+1}_L{L}{SUFFIX}_last.pth"))
+        # Save last checkpoint
+        last_path = os.path.join(
+            save_dir,
+            f"stage{stage_idx+1}_L{L}_last{SUFFIX}.pth")
+        torch.save(model.state_dict(), last_path)
 
-    return history
+    print(f"  Stage {stage_idx+1} done.  Best val PSNR = {best_psnr:.4f} @ ep {best_epoch}")
+    return history, best_path
 
 
 def _find_resume_stage(L, num_stages, save_dir=CHECKPOINT_DIR):
-    final_path = os.path.join(save_dir, f"model_L{L}{SUFFIX}_final.pth")
+    final_path = os.path.join(save_dir, f"model_L{L}_final{SUFFIX}.pth")
     if os.path.isfile(final_path):
         return None, None
 
     last_done = 0
     for i in range(1, num_stages + 1):
-        ckpt = os.path.join(save_dir, f"stage{i}_L{L}{SUFFIX}_last.pth")
+        ckpt = os.path.join(save_dir, f"stage{i}_L{L}_last{SUFFIX}.pth")
         if os.path.isfile(ckpt):
             last_done = i
         else:
@@ -165,37 +187,37 @@ def _find_resume_stage(L, num_stages, save_dir=CHECKPOINT_DIR):
     if last_done == 0:
         return next_stage_idx, None
 
-    ckpt_path = os.path.join(save_dir, f"stage{last_done}_L{L}{SUFFIX}_last.pth")
+    ckpt_path = os.path.join(save_dir, f"stage{last_done}_L{L}_last{SUFFIX}.pth")
     return next_stage_idx, ckpt_path
 
 
-def train_greedy(L=1, num_stages=NUM_STAGES, num_epochs=NUM_EPOCHS,
-                 device=DEVICE, save_dir=CHECKPOINT_DIR, plot_dir=PLOT_DIR,
-                 num_workers=None, multi_gpu=True, resume=False):
-    if num_workers is None:
-        num_workers = DATALOADER_NUM_WORKERS
+def train(L=1, num_stages=NUM_STAGES, epochs=NUM_EPOCHS, workers=None,
+          save_dir=CHECKPOINT_DIR, plot_dir=PLOT_DIR, resume=False):
+    device = DEVICE
 
     if resume:
         start_stage, load_path = _find_resume_stage(L, num_stages, save_dir)
         if start_stage is None:
             print(f"\n  [L={L}] Already complete — skipping.")
-            return None, None
+            return None
         print(f"\n  [L={L}] Resuming from stage {start_stage+1}/{num_stages}")
     else:
         start_stage = 0
         load_path = None
 
-    print(f"\n{'#'*60}")
-    print(f"  FULL-LEARN TRAINING  L={L}  T={num_stages}")
+    print("#" * 60)
+    print(f"  FINETUNED TRAINING  L={L}  T={num_stages}")
     if resume:
         print(f"  RESUME from stage {start_stage+1}")
-    print(f"  Learnable: k_i (filters), γ, φ_i (RBF), λ^t")
-    print(f"{'#'*60}")
+    print(f"  Learnable: K, γ, τ, ν, σ, φ_i (RBF), λ^t")
+    print("#" * 60)
 
     model = FullLearnInertialTNRDNetwork(
         num_stages=num_stages, num_filters=NUM_FILTERS, filter_size=FILTER_SIZE,
-        gamma_init=GAMMA_INERTIA, sigma_smooth=SIGMA_SMOOTH, nu=NU,
-        K_thresh=K, num_centers=RBF_NUM_CENTERS, use_g_func=True, device=device,
+        gamma_init=GAMMA_INERTIA, tau_init=0.2, nu_init=NU,
+        K_init=K, sigma_init=SIGMA_SMOOTH,
+        num_centers=RBF_NUM_CENTERS, use_g_func=True,
+        device=device,
     ).to(device)
 
     if load_path is not None:
@@ -203,42 +225,56 @@ def train_greedy(L=1, num_stages=NUM_STAGES, num_epochs=NUM_EPOCHS,
         model.load_state_dict(sd)
         model.to(device)
         print(f"  Loaded checkpoint: {load_path}")
-    else:
-        model.print_param_summary()
 
-    if multi_gpu and device.type == "cuda" and torch.cuda.device_count() > 1:
-        model = nn.DataParallel(model)
-        print(f"  DataParallel across {torch.cuda.device_count()} GPUs")
+    n_total = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    n_fixed = sum(p.numel() for p in model.parameters() if not p.requires_grad)
+    print(f"  Params: {n_total:,} trainable  |  {n_fixed:,} fixed")
+    for t in range(num_stages):
+        s = model.stages[t]
+        print(f"    Stage {t+1}: γ={s.gamma.item():.4f}  τ={s.tau.item():.4f}  "
+              f"K={s.K_thresh.item():.1f}  ν={s.nu.item():.4f}  σ={s.sigma.item():.4f}")
 
-    train_loader = make_train_loader(CLEAN_TRAIN_DIR, L=L, batch_size=BATCH_SIZE,
-                                      patch_size=PATCH_SIZE, num_workers=num_workers)
-    val_loader = make_val_loader(CLEAN_VAL_DIR, L=L, batch_size=1,
-                                  patch_size=PATCH_SIZE, seed=42,
-                                  num_workers=num_workers,
-                                  max_images=VAL_MAX_IMAGES if VAL_MAX_IMAGES > 0 else None)
-
-    all_history = {}
+    history_all = {}
     for stage_idx in range(start_stage, num_stages):
-        hist = train_stage(model, stage_idx, train_loader, val_loader, device,
-                           num_epochs=num_epochs, lr=LR, L=L,
-                           save_dir=save_dir, plot_dir=plot_dir)
-        all_history[f"stage_{stage_idx+1}"] = hist
+        if L == 1 and stage_idx < len(CURRICULUM_L1_SCHEDULE):
+            L_curriculum = CURRICULUM_L1_SCHEDULE[stage_idx]
+        else:
+            L_curriculum = L
 
-    os.makedirs(save_dir, exist_ok=True)
+        print(f"\n  Curriculum L={L_curriculum} for stage {stage_idx+1}")
+        train_loader_cur = make_train_loader(
+            CLEAN_TRAIN_DIR, L=L_curriculum,
+            batch_size=BATCH_SIZE, patch_size=PATCH_SIZE,
+            num_workers=workers, max_images=None)
+        val_loader_cur = make_val_loader(
+            CLEAN_VAL_DIR, L=L_curriculum,
+            batch_size=BATCH_SIZE, patch_size=PATCH_SIZE,
+            seed=42, num_workers=workers,
+            max_images=VAL_MAX_IMAGES)
+
+        hist, best_path = train_stage(
+            model, stage_idx, train_loader_cur, val_loader_cur, device,
+            num_epochs=epochs, lr=LR, L=L_curriculum,
+            save_dir=save_dir, plot_dir=plot_dir)
+        history_all[stage_idx] = hist
+
+    # Save final model
+    final_path = os.path.join(save_dir, f"model_L{L}_final{SUFFIX}.pth")
+    torch.save(model.state_dict(), final_path)
+    print(f"\n  Final model → {final_path}")
+
+    # Save training history
     hist_path = os.path.join(save_dir, f"training_history_L{L}{SUFFIX}.json")
     old_hist = {}
     if resume and os.path.isfile(hist_path):
         with open(hist_path) as fp:
             old_hist = json.load(fp)
-    old_hist.update(all_history)
+    old_hist.update({str(k): v for k, v in history_all.items()})
     with open(hist_path, "w") as fp:
-        json.dump(old_hist, fp, indent=2)
+        json.dump(old_hist, fp, indent=2, default=str)
+    print(f"  History → {hist_path}")
 
-    final_base = model.module if isinstance(model, nn.DataParallel) else model
-    final_path = os.path.join(save_dir, f"model_L{L}{SUFFIX}_final.pth")
-    final_base.save(final_path)
-    print(f"\n  Final model → {final_path}")
-    return model, old_hist
+    return model
 
 
 def main():
@@ -246,7 +282,8 @@ def main():
     parser.add_argument("--L", type=int, default=1)
     parser.add_argument("--stages", type=int, default=NUM_STAGES)
     parser.add_argument("--epochs", type=int, default=NUM_EPOCHS)
-    parser.add_argument("--both", action="store_true")
+    parser.add_argument("--both", action="store_true",
+                        help="Train both L=1 and L=10 sequentially")
     parser.add_argument("--workers", type=int, default=None)
     parser.add_argument("--no-multi-gpu", action="store_true")
     parser.add_argument("--resume", action="store_true",
@@ -255,27 +292,18 @@ def main():
                         help="Run/resume all L values in sequence (1, 10)")
     args = parser.parse_args()
 
-    device = DEVICE
-    if device.type == "cuda":
-        torch.backends.cudnn.benchmark = True
-    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-    os.makedirs(PLOT_DIR, exist_ok=True)
-
     if args.pipeline:
         for L in [1, 10]:
             ns = 10 if L == 1 else min(args.stages, 5)
-            train_greedy(L=L, num_stages=ns, num_epochs=args.epochs,
-                          device=device, num_workers=args.workers,
-                          multi_gpu=not args.no_multi_gpu, resume=True)
+            train(L=L, num_stages=ns, epochs=args.epochs,
+                  workers=args.workers, resume=True)
     elif args.both:
-        for L in [1, 10]:
-            train_greedy(L=L, num_stages=args.stages, num_epochs=args.epochs,
-                          device=device, num_workers=args.workers,
-                          multi_gpu=not args.no_multi_gpu, resume=args.resume)
+        for L in [10, 1]:
+            train(L=L, num_stages=min(args.stages, 5) if L == 10 else args.stages,
+                  epochs=args.epochs, workers=args.workers, resume=args.resume)
     else:
-        train_greedy(L=args.L, num_stages=args.stages, num_epochs=args.epochs,
-                      device=device, num_workers=args.workers,
-                      multi_gpu=not args.no_multi_gpu, resume=args.resume)
+        train(L=args.L, num_stages=args.stages,
+              epochs=args.epochs, workers=args.workers, resume=args.resume)
 
 
 if __name__ == "__main__":

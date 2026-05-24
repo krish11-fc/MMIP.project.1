@@ -3,9 +3,10 @@ compare_models.py — Comprehensive comparison of:
  
   A. Learned TNRD (current model, stage-wise trained RBF + g-function)
   B. PDE baseline (Majee 2020 analytic, no learned components)
-  C. Full-learn variant (learnable filters k_i + learnable γ + RBF)
+  C. Learn-K (learnable filter bank k_i + learnable γ + RBF)
   D. TNRD-log (log-transformed, first-order diffusion, no g-function)
   E. NCTDN (noise-conditional telegraph diffusion, single model for all L)
+  F. Full-Learn (learnable PDE scalars γ,τ,ν,K,σ + RBF, frozen filters)
 
 Metrics: PSNR, SSIM, SI, per-image breakdown, wall-time.
 Outputs: tables, JSON, bar charts.
@@ -23,7 +24,7 @@ from config import (
     CHECKPOINT_DIR, NUM_STAGES, NUM_FILTERS, FILTER_SIZE,
     GAMMA_INERTIA, SIGMA_SMOOTH, NU, K, RBF_NUM_CENTERS, TAU,
 )
-from models import InertialTNRDNetwork, FullLearnInertialTNRDNetwork, TNRDLogNetwork
+from models import InertialTNRDNetwork, LearnKInertialTNRDNetwork, FullLearnInertialTNRDNetwork, TNRDLogNetwork
 from models.noise_conditional_network import NoiseConditionalTNRDNetwork
 from config import EMBED_DIM, NUM_NOISE_LEVELS
 from dataset import make_test_loader
@@ -89,18 +90,31 @@ def build_models(L, ckpt_dir, device=DEVICE):
     # B. Majeed PDE baseline (analytic, no learned params)
     models["B_PDE_Baseline"] = None
 
-    # C. Full-learn variant
-    _, ns_c = _find_best_ckpt(ckpt_dir, L, "_fulllearn")
-    m_c = FullLearnInertialTNRDNetwork(
+    # C. Learn-K variant (learns filter bank k_i + gamma + RBF)
+    _, ns_c = _find_best_ckpt(ckpt_dir, L, "_learnk")
+    m_c = LearnKInertialTNRDNetwork(
         num_stages=ns_c, num_filters=NUM_FILTERS, filter_size=FILTER_SIZE,
         gamma_init=GAMMA_INERTIA, sigma_smooth=SIGMA_SMOOTH, nu=NU,
         K_thresh=K, num_centers=RBF_NUM_CENTERS, use_g_func=True, device=device,
     ).to(device)
-    loaded_c, ok_c = _load_ckpt(m_c, ckpt_dir, L, "_fulllearn")
+    loaded_c, ok_c = _load_ckpt(m_c, ckpt_dir, L, "_learnk")
     if loaded_c:
         m_c.eval()
-    models["C_Full_Learn"] = loaded_c
-    print(f"  C: Full-Learn  {'✓ loaded' if ok_c else '✗ no ckpt (untrained)'}  (stages={ns_c})")
+    models["C_Learn_K"] = loaded_c
+    print(f"  C: Learn-K  {'✓ loaded' if ok_c else '✗ no ckpt (untrained)'}  (stages={ns_c})")
+
+    # F. Full-Learn variant (learns all PDE scalars + RBF, frozen filters)
+    _, ns_f = _find_best_ckpt(ckpt_dir, L, "_fulllearn")
+    m_f = FullLearnInertialTNRDNetwork(
+        num_stages=ns_f, num_filters=NUM_FILTERS, filter_size=FILTER_SIZE,
+        gamma_init=GAMMA_INERTIA, nu_init=NU, K_init=K,
+        num_centers=RBF_NUM_CENTERS, use_g_func=True, device=device,
+    ).to(device)
+    loaded_f, ok_f = _load_ckpt(m_f, ckpt_dir, L, "_fulllearn")
+    if loaded_f:
+        m_f.eval()
+    models["F_Full_Learn"] = loaded_f
+    print(f"  F: Full-Learn  {'✓ loaded' if ok_f else '✗ no ckpt (untrained)'}  (stages={ns_f})")
 
     # D. TNRD-log
     _, ns_d = _find_best_ckpt(ckpt_dir, L, "_tnrdlog")
@@ -201,12 +215,14 @@ def eval_all_models(models, loader, device):
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _short_name(name):
-    return name.replace("A_", "A: ").replace("B_", "B: ").replace("C_", "C: ").replace("D_", "D: ").replace("E_", "E: ").replace("_", " ")
+    return (name.replace("A_", "A: ").replace("B_", "B: ").replace("C_", "C: ")
+            .replace("D_", "D: ").replace("E_", "E: ").replace("F_", "F: ")
+            .replace("_", " "))
 
 def plot_comparison(all_results, L, save_dir):
     names = list(all_results.keys())
     short_names = [_short_name(n) for n in names]
-    colors = ["steelblue", "firebrick", "forestgreen", "darkorange", "purple"]
+    colors = ["steelblue", "firebrick", "forestgreen", "darkorange", "purple", "brown"]
 
     for metric, ylabel in [("psnr_mean", "PSNR (dB)"), ("ssim_mean", "SSIM")]:
         fig, ax = plt.subplots(figsize=(8, 4.5))
@@ -268,9 +284,10 @@ def write_report(all_results, L, save_dir):
         "    C vs A: Benefit of learning filter bank k_i + γ vs fixing them",
         "    D vs B: Benefit of TNRD on log-transformed speckle vs direct PDE",
         "    E vs A: Benefit of noise-conditional FiLM modulation across all L",
+        "    F vs A: Benefit of learning all PDE scalars (γ,τ,ν,K,σ) vs fixing them",
         "",
         "  Notes:",
-        "    - C (Full-Learn) and D (TNRD-Log) need dedicated training to converge.",
+        "    - C (Learn-K), D (TNRD-Log), F (Full-Learn) need dedicated training.",
         "      Current results use untrained (warm-start) weights if no checkpoint.",
         "    - E (NCTDN) is a single model trained on all noise levels jointly.",
         "    - B (PDE Baseline) uses 200 iterations of the analytic PDE.",

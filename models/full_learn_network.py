@@ -1,92 +1,64 @@
-import os
+"""
+models/full_learn_network.py — T-stage network learning all PDE scalars + RBF + λ.
+"""
 import torch
 import torch.nn as nn
-from config import (
-    NUM_STAGES, NUM_FILTERS, FILTER_SIZE,
-    SIGMA_SMOOTH, NU, K, RBF_NUM_CENTERS,
-)
-from models.full_learn_stage import FullLearnInertialDiffusionStage
+from .full_learn_stage import FullLearnInertialDiffusionStage
+
 
 class FullLearnInertialTNRDNetwork(nn.Module):
     """
-    Variant that learns ALL parameters: filter bank k_i, gamma, RBF φ_i, lambda.
-    Initialized from the same DCT warm-start + Perona-Malik as the original.
+    T-stage Inertial TNRD with all PDE scalars (K, γ, τ, ν, σ) learnable.
+
+    Filters k_i remain frozen (fixed DCT bank). The optimizer updates
+    the 5 PDE scalars + RBF φ_i weights + λ simultaneously.
     """
 
-    def __init__(
-        self,
-        num_stages:    int   = NUM_STAGES,
-        num_filters:   int   = NUM_FILTERS,
-        filter_size:   int   = FILTER_SIZE,
-        gamma_init:    float = 0.5,
-        sigma_smooth:  float = SIGMA_SMOOTH,
-        nu:            float = NU,
-        K_thresh:      float = K,
-        num_centers:   int   = RBF_NUM_CENTERS,
-        use_g_func:    bool  = True,
-        device:        torch.device = torch.device("cpu"),
-    ):
+    def __init__(self, num_stages=10, num_filters=48, filter_size=7,
+                 gamma_init=0.5, tau_init=0.2, nu_init=1.0,
+                 K_init=128.0, sigma_init=1.0,
+                 num_centers=63, use_g_func=True, device="cpu"):
         super().__init__()
-        self.T             = num_stages
 
-        # T independent stages — each has its own learned filters, φ_i, λ
-        self.stages = nn.ModuleList([
-            FullLearnInertialDiffusionStage(
-                num_filters   = num_filters,
-                filter_size   = filter_size,
-                num_centers   = num_centers,
-                gamma_init    = gamma_init,
-                tau           = 0.2,
-                nu            = nu,
-                sigma_smooth  = sigma_smooth,
-                K_thresh      = K_thresh,
-                use_g_func    = use_g_func,
-            )
-            for _ in range(num_stages)
-        ])
+        self.T = num_stages
+
+        from utils.filters import build_dct_filters
+        filter_bank = build_dct_filters(
+            num_filters=num_filters,
+            filter_size=filter_size,
+            device="cpu",
+        ).to(device)
+
+        self.stages = nn.ModuleList()
+        for t in range(num_stages):
+            self.stages.append(FullLearnInertialDiffusionStage(
+                filter_bank=filter_bank,
+                num_centers=num_centers,
+                gamma_init=gamma_init,
+                tau_init=tau_init,
+                nu_init=nu_init,
+                K_init=K_init,
+                sigma_init=sigma_init,
+                use_g_func=use_g_func,
+            ))
 
     def forward(self, f, active_stages=None):
-        n     = active_stages if active_stages is not None else self.T
+        T = active_stages if active_stages is not None else self.T
         u_prv = f.clone()
         u_cur = f.clone()
-        stage_outputs = []
-        for t in range(n):
+        all_outputs = []
+        for t in range(T):
             u_nxt = self.stages[t](u_cur, u_prv, f)
-            stage_outputs.append(u_nxt)
+            all_outputs.append(u_nxt)
             u_prv = u_cur
             u_cur = u_nxt
-        return u_cur, stage_outputs
+        return u_cur, all_outputs
 
-    def freeze_stages(self, up_to: int) -> None:
-        for t in range(min(up_to, self.T)):
-            for p in self.stages[t].parameters():
-                p.requires_grad_(False)
+    def freeze_stages(self, up_to):
+        for i, s in enumerate(self.stages):
+            for p in s.parameters():
+                p.requires_grad = (i >= up_to)
 
-    def unfreeze_stage(self, stage_idx: int) -> None:
+    def unfreeze_stage(self, stage_idx):
         for p in self.stages[stage_idx].parameters():
-            p.requires_grad_(True)
-
-    def get_stage_params(self, stage_idx: int) -> list:
-        return [p for p in self.stages[stage_idx].parameters() if p.requires_grad]
-
-    def save(self, path: str) -> None:
-        os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
-        torch.save(self.state_dict(), path)
-
-    def load(self, path: str, map_location=None) -> None:
-        sd = torch.load(path, map_location="cpu")
-        self.load_state_dict(sd)
-
-    def print_param_summary(self) -> None:
-        total   = sum(p.numel() for p in self.parameters())
-        learned = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        n_buf   = sum(b.numel() for b in self.buffers())
-        print(f"  FullLearnInertialTNRDNetwork  T={self.T}")
-        print(f"    Learnable params   : {learned:,}  (k_i + γ + φ_i RBF + λ^t)")
-        print(f"    Fixed buffers      : {n_buf:,}   (Gaussian kernels)")
-        for t, stage in enumerate(self.stages):
-            n_ki  = stage.Ki.numel()
-            n_phi = sum(p.numel() for p in stage.phi.parameters())
-            print(f"    Stage {t+1}: k_i={n_ki}  φ={n_phi}  "
-                  f"γ={stage.gamma_inertia.item():.4f}  "
-                  f"λ={stage.lambda_t.item():.4f}")
+            p.requires_grad = True
