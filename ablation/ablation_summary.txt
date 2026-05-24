@@ -1,0 +1,49 @@
+==========================================================================
+  ABLATION STUDY SUMMARY
+  Architecture: u_tt + γ·u_t = div( g(u_σ) · φ_i(K_i*u) · K_i^T )
+  Fixed : k_i (DCT filter bank), γ=0.5
+  Learned: φ_i^t (RBF per stage), λ^t (fidelity per stage)
+  K=128.0  (scale-corrected for [0,255] images)
+==========================================================================
+
+  Noise level: L1
+  Variant                                        PSNR (dB)      SSIM        SI
+  ------------------------------------------------------------------------
+  A1  Full model (g=True, trained RBF φ_i)         15.7040    0.2522    0.4110
+  A2  No gray-level g  (g≡1, only RBF)              9.5183    0.0983    0.8569
+  A3  Fixed RBF (Perona-Malik, no training)         9.5551    0.1008    0.8532
+  A5  PDE Baseline (paper analytic model)          16.0566    0.2956    0.3092
+
+  A4  Effect of number of stages T:
+      T   PSNR (dB)      SSIM
+  ----------------------------
+      1      9.9992    0.1070
+      2     10.7893    0.1181
+      3     12.0171    0.1382
+      4     13.7186    0.1747
+      5     15.7040    0.2522
+
+  Noise level: L10
+  Variant                                        PSNR (dB)      SSIM        SI
+  ------------------------------------------------------------------------
+  A1  Full model (g=True, trained RBF φ_i)         24.2615    0.5534    0.4016
+  A2  No gray-level g  (g≡1, only RBF)             16.0448    0.2977    0.5300
+  A3  Fixed RBF (Perona-Malik, no training)        16.1828    0.3108    0.5262
+  A5  PDE Baseline (paper analytic model)          16.6834    0.3252    0.5138
+
+  A4  Effect of number of stages T:
+      T   PSNR (dB)      SSIM
+  ----------------------------
+      1     17.4185    0.3446
+      2     19.5124    0.4023
+      3     22.9956    0.5292
+      4     25.3445    0.6744
+      5     24.2615    0.5534
+
+==========================================================================
+  Key findings:
+  A1 vs A2 : contribution of gray-level indicator g(u_σ)
+  A1 vs A3 : benefit of training RBF φ_i vs fixed Perona-Malik
+  A1 vs A5 : benefit of learned components vs analytic PDE
+  A4       : PSNR/SSIM improvement per additional unrolled stage
+==========================================================================

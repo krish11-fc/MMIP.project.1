@@ -1,0 +1,32 @@
+============================================================================
+  ABLATION STUDY — Inertial TNRD Despeckling
+  Model: u_tt + γ·u_t = div( g(u_σ) · φ_i(K_i*u) · K_i^T )
+  Fixed : k_i (DCT filter bank), γ (damping)
+  Learned: φ_i^t (RBF per stage), g modulated diffusion
+============================================================================
+
+  Noise level: L10
+  Variant                                            PSNR (dB)       ±      SSIM       ±
+  ----------------------------------------------------------------------------------
+  A1  Full model (g + learned RBF)                   16.5395  0.6084    0.3244  0.0727
+  A2  No gray-level g  (g≡1)                             N/A     N/A       N/A     N/A
+  A3  Fixed RBF (Perona-Malik, not trained)          16.4506  0.6056    0.3200  0.0717
+  A5  PDE Baseline (analytic, no learned params)     16.4562  0.6060    0.3204  0.0718
+
+  A4  Effect of number of active stages T:
+      T   PSNR (dB)       ±      SSIM     ΔPSNR
+  --------------------------------------------
+      1     16.4608  0.6062    0.3207          —
+      2     16.4730  0.6065    0.3213   +0.0122
+      3     16.4905  0.6070    0.3221   +0.0175
+      4     16.5128  0.6077    0.3231   +0.0223
+      5     16.5395  0.6084    0.3244   +0.0267
+
+============================================================================
+  Interpretation guide:
+  A1 vs A2 → contribution of g(u_σ) beyond gradient-only diffusion
+  A1 vs A3 → benefit of training φ_i vs fixed Perona-Malik shape
+  A1 vs A5 → gap between learned model and the analytic PDE (paper eq 2.5)
+  A4       → whether deeper unrolling (more stages) keeps improving PSNR
+             Δ<0.01 dB indicates training did not benefit from deeper unrolling
+============================================================================
