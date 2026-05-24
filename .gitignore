@@ -3,6 +3,7 @@
 # ── Outputs / generated files ──
 checkpoints/
 outputs/
+ablation/
 __pycache__/
 *.pyc
 *.pth
