@@ -1,17 +1,3 @@
-"""
-models/full_learn_stage.py — Learns all PDE scalars + RBF + λ.
-
-Same as the original InertialDiffusionStage, but K, γ, τ, ν, σ are
-nn.Parameters instead of fixed floats.  Filters remain frozen buffers.
-
-Motivation:
-  The original stage.py treats these as construction-time constants.
-  During training, gradient flows through φ_i (RBF) and λ but NOT
-  through the PDE scalars.  This variant lets the optimizer fine-tune
-  all five simultaneously with the RBF weights.
-
-Params added per stage:  5 scalars  (~negligible vs 5,376 RBF weights)
-"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -44,12 +30,16 @@ class FullLearnInertialDiffusionStage(nn.Module):
 
         self.use_g_func = use_g_func
 
-        # ── Learnable PDE scalars (log-parameterised for positivity) ──
-        self.log_gamma  = nn.Parameter(torch.tensor(gamma_init).log())
-        self.log_tau    = nn.Parameter(torch.tensor(tau_init).log())
-        self.log_nu     = nn.Parameter(torch.tensor(nu_init).log())
-        self.log_K      = nn.Parameter(torch.tensor(K_init).log())
-        self.log_sigma  = nn.Parameter(torch.tensor(sigma_init).log())
+        # ── Learnable PDE scalars (softplus-parameterised for positivity) ──
+        # softplus: smoother gradients near zero, bounded gradient magnitude
+        import numpy as np
+        def _inv_softplus(y):
+            return np.log(np.expm1(max(y, 1e-6)))
+        self._gamma_raw  = nn.Parameter(torch.tensor(_inv_softplus(gamma_init), dtype=torch.float32))
+        self._tau_raw    = nn.Parameter(torch.tensor(_inv_softplus(tau_init), dtype=torch.float32))
+        self._nu_raw     = nn.Parameter(torch.tensor(_inv_softplus(nu_init), dtype=torch.float32))
+        self._K_raw      = nn.Parameter(torch.tensor(_inv_softplus(K_init), dtype=torch.float32))
+        self._sigma_raw  = nn.Parameter(torch.tensor(_inv_softplus(sigma_init), dtype=torch.float32))
 
         # ── Learnable: RBF influence function φ_i ──
         from utils.rbf import RBFInfluenceFunction
@@ -62,19 +52,19 @@ class FullLearnInertialDiffusionStage(nn.Module):
     # ── Parameter properties ──────────────────────────────────────────
 
     @property
-    def gamma(self): return self.log_gamma.exp()
+    def gamma(self): return F.softplus(self._gamma_raw) + 1e-3
 
     @property
-    def tau(self): return self.log_tau.exp()
+    def tau(self): return F.softplus(self._tau_raw) + 1e-3
 
     @property
-    def nu(self): return self.log_nu.exp()
+    def nu(self): return F.softplus(self._nu_raw) + 1e-3
 
     @property
-    def K_thresh(self): return self.log_K.exp()
+    def K_thresh(self): return F.softplus(self._K_raw) + 0.1
 
     @property
-    def sigma(self): return self.log_sigma.exp()
+    def sigma(self): return F.softplus(self._sigma_raw) + 1e-3
 
     @property
     def lambda_t(self): return F.softplus(self.log_lambda)
@@ -82,7 +72,6 @@ class FullLearnInertialDiffusionStage(nn.Module):
     # ── Blur kernel (regenerated when σ changes) ──────────────────────
 
     def _get_blur_kernel(self):
-        """Return a kernel matching current σ, cached if unchanged."""
         s = self.sigma.item()
         ksz = self.Ki.shape[-1]
         half = ksz // 2

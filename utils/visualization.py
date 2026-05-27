@@ -1,9 +1,3 @@
-"""
-utils/visualization.py
-Plotting helpers for Project 8.
-All functions save figures to disk; they do not call plt.show().
-"""
-
 import os
 import numpy as np
 import matplotlib
@@ -12,16 +6,12 @@ import matplotlib.pyplot as plt
 import torch
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Training curves
-# ─────────────────────────────────────────────────────────────────────────────
 
 def plot_loss_curve(
     train_losses: list,
     stage: int,
     save_path: str,
 ) -> None:
-    """Plot and save training loss curve for one stage."""
     os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else ".", exist_ok=True)
     fig, ax = plt.subplots(figsize=(6, 3.5))
     ax.plot(range(1, len(train_losses) + 1), train_losses, color="steelblue", linewidth=1.5)
@@ -40,7 +30,6 @@ def plot_psnr_curve(
     stage:       int,
     save_path:   str,
 ) -> None:
-    """Plot and save train/val PSNR curves for one stage."""
     os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else ".", exist_ok=True)
     epochs = range(1, len(train_psnrs) + 1)
     fig, ax = plt.subplots(figsize=(6, 3.5))
@@ -56,9 +45,7 @@ def plot_psnr_curve(
     plt.close(fig)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Influence functions  φ_i(s)
-# ─────────────────────────────────────────────────────────────────────────────
 
 def plot_influence_functions(
     phi,           # RBFInfluenceFunction module
@@ -96,12 +83,9 @@ def plot_influence_functions(
     plt.close(fig)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Denoising result panels
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _to_np(t: torch.Tensor) -> np.ndarray:
-    """(1,1,H,W) or (1,H,W) → (H,W) float32 in [0,255]."""
     return t.detach().cpu().float().squeeze().numpy().clip(0, 255)
 
 
@@ -116,7 +100,6 @@ def plot_denoising_result(
     save_path:  str,
     title:      str = "",
 ) -> None:
-    """Side-by-side: GT | Noisy | Restored."""
     os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else ".", exist_ok=True)
     fig, axes = plt.subplots(1, 3, figsize=(12, 4))
     imgs   = [_to_np(u_gt),   _to_np(f),        _to_np(u_pred)]
@@ -142,7 +125,6 @@ def plot_stage_outputs(
     f:             torch.Tensor,
     save_path:     str,
 ) -> None:
-    """Plot intermediate outputs of each stage + noisy input + GT."""
     os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else ".", exist_ok=True)
     T = len(stage_outputs)
     fig, axes = plt.subplots(1, T + 2, figsize=(3 * (T + 2), 3))
@@ -161,9 +143,7 @@ def plot_stage_outputs(
     plt.close(fig)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Ablation charts
-# ─────────────────────────────────────────────────────────────────────────────
 
 def plot_ablation_bar(
     results:   dict,
@@ -172,7 +152,6 @@ def plot_ablation_bar(
     title:     str,
     save_path: str,
 ) -> None:
-    """Bar chart for ablation study results."""
     os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else ".", exist_ok=True)
     labels = list(results.keys())
     values = [results[k][metric] for k in labels]
@@ -192,7 +171,6 @@ def save_results_table(
     all_results: dict,
     save_path:   str,
 ) -> None:
-    """Save a plain-text comparison table to disk."""
     os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else ".", exist_ok=True)
     lines = [
         f"{'Method':<30}  {'PSNR (dB)':>10}  {'SSIM':>8}",

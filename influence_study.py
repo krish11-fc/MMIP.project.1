@@ -133,7 +133,6 @@ def plot_influence_functions_per_stage(model, L, save_dir, n_filters=8):
     plt.close(fig)
     print(f"  Saved → {path}")
 
-    # ── Also plot each filter's φ across all stages (filter-centric view) ──
     fig, axes = plt.subplots(2, 4, figsize=(16, 7))
     axes = axes.flatten()
     colors = plt.cm.viridis(np.linspace(0.2, 0.9, T))
@@ -158,7 +157,6 @@ def plot_influence_functions_per_stage(model, L, save_dir, n_filters=8):
     plt.close(fig)
     print(f"  Saved → {path}")
 
-    # ── Summary: phi weights heatmap per stage ─────────────────────────────
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     for idx, ax in enumerate(axes):
         # Show weights for a few filters
@@ -168,7 +166,6 @@ def plot_influence_functions_per_stage(model, L, save_dir, n_filters=8):
             w = model.stages[t].phi.weights[:n_filt_show].detach().cpu().numpy()
             w_all.append(w)
         w_stack = np.stack(w_all, axis=0)  # (T, n_filt_show, C)
-        # Plot mean across filters
         if idx == 0:
             im = ax.imshow(w_stack.mean(axis=1), aspect="auto", cmap="RdBu_r",
                            vmin=-1, vmax=1)
@@ -234,7 +231,6 @@ def plot_pde_baseline_influence(save_dir):
     plt.close(fig)
     print(f"  Saved → {path}")
 
-    # ── φ(s) = 2s/(1+s²) Perona-Malik (the RBF warm-start) ────────────────
     s2 = np.linspace(-10, 10, 400)
     pm = 2.0 * s2 / (1.0 + s2 ** 2)
 

@@ -1,16 +1,3 @@
-"""
-compare_models.py — Comprehensive comparison of:
- 
-  A. Learned TNRD (current model, stage-wise trained RBF + g-function)
-  B. PDE baseline (Majee 2020 analytic, no learned components)
-  C. Learn-K (learnable filter bank k_i + learnable γ + RBF)
-  D. TNRD-log (log-transformed, first-order diffusion, no g-function)
-  E. NCTDN (noise-conditional telegraph diffusion, single model for all L)
-  F. Full-Learn (learnable PDE scalars γ,τ,ν,K,σ + RBF, frozen filters)
-
-Metrics: PSNR, SSIM, SI, per-image breakdown, wall-time.
-Outputs: tables, JSON, bar charts.
-"""
 import os, sys, json, argparse, time
 import numpy as np
 import torch
@@ -35,9 +22,6 @@ COMPARE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs"
 os.makedirs(COMPARE_DIR, exist_ok=True)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Model loading helpers
-# ──────────────────────────────────────────────────────────────────────────────
 
 def _find_best_ckpt(ckpt_dir, L, suffix=""):
     import re
@@ -66,7 +50,7 @@ def _load_ckpt(model, ckpt_dir, L, suffix=""):
     path, actual_stages = _find_best_ckpt(ckpt_dir, L, suffix)
     if path and os.path.exists(path):
         sd = torch.load(path, map_location="cpu")
-        model.load_state_dict(sd)
+        model.load_state_dict(sd, strict=False)
         return model, True
     return model, False
 
@@ -88,7 +72,8 @@ def build_models(L, ckpt_dir, device=DEVICE):
         print(f"  A: Learned TNRD  {'✓ loaded' if ok else '✗ no ckpt'}  (stages={ns_a})")
 
     # B. Majeed PDE baseline (analytic, no learned params)
-    models["B_PDE_Baseline"] = None
+    models["B_PDE_Baseline"] = lambda f, _gamma=GAMMA_INERTIA, _tau=TAU, _nu=NU, _K=K, _sigma=SIGMA_SMOOTH: \
+        run_pde_baseline(f, gamma=_gamma, tau=_tau, nu=_nu, K_thresh=_K, sigma=_sigma)
 
     # C. Learn-K variant (learns filter bank k_i + gamma + RBF)
     _, ns_c = _find_best_ckpt(ckpt_dir, L, "_learnk")
@@ -152,9 +137,7 @@ def build_models(L, ckpt_dir, device=DEVICE):
     return models
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Evaluation
-# ──────────────────────────────────────────────────────────────────────────────
 
 @torch.no_grad()
 def eval_one(model_or_fn, u_gt, f, device, name=""):
@@ -163,10 +146,7 @@ def eval_one(model_or_fn, u_gt, f, device, name=""):
     u_gt = u_gt.to(device)
     f = f.to(device)
 
-    if name == "B_PDE_Baseline":
-        u_pred = run_pde_baseline(f, gamma=GAMMA_INERTIA, tau=TAU,
-                                   nu=NU, K_thresh=K, sigma=SIGMA_SMOOTH)
-    elif isinstance(model_or_fn, torch.nn.Module):
+    if isinstance(model_or_fn, torch.nn.Module):
         model_or_fn.eval()
         u_pred, _ = model_or_fn(f)
     else:
@@ -210,9 +190,7 @@ def eval_all_models(models, loader, device):
     return results
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Plotting & Reporting
-# ──────────────────────────────────────────────────────────────────────────────
 
 def _short_name(name):
     return (name.replace("A_", "A: ").replace("B_", "B: ").replace("C_", "C: ")
@@ -299,9 +277,7 @@ def write_report(all_results, L, save_dir):
     print(f"  Report → {path}")
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Main
-# ──────────────────────────────────────────────────────────────────────────────
 
 def run_comparison(L=1, test_dir=None, ckpt_dir=CHECKPOINT_DIR, device=DEVICE):
     if test_dir is None:

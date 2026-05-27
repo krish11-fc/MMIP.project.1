@@ -1,39 +1,3 @@
-"""
-models/network.py
-Full T-stage Inertial TNRD network for Project 8.
-
-Wraps T InertialDiffusionStage modules into a single nn.Module with:
-  • greedy freeze / unfreeze utilities used by train.py
-  • `active_stages` parameter for partial unrolling (ablation / greedy training)
-  • save / load / print_param_summary helpers
-  • output range clamped to [0, 255]
-
-BUG 2 FIX (DataParallel):
-    train.py wrapped the model in nn.DataParallel BEFORE calling
-    freeze_stages / unfreeze_stage / model.save().  nn.DataParallel does not
-    expose custom methods — only forward().  This caused AttributeError on
-    multi-GPU or silently skipped all freezing on single GPU.
-
-    Fix applied in train.py: unwrap with
-        base = model.module if isinstance(model, nn.DataParallel) else model
-    before calling any custom method.
-
-    The network itself is unchanged; the fix lives in train.py.
-
-Architecture recap
-------------------
-Fixed  : k_i (filter bank, shared across all stages), γ (damping)
-Learned: φ_i^t (RBF weights, one set per stage), λ^t (fidelity, one per stage)
-
-Forward signature
------------------
-    u_T, stage_outputs = net(f)
-    u_T, stage_outputs = net(f, active_stages=3)
-
-`stage_outputs` is a list of length `active_stages` containing u^1, u^2, … u^T.
-`u_T` == stage_outputs[-1].
-"""
-
 import os
 import torch
 import torch.nn as nn
@@ -145,18 +109,15 @@ class InertialTNRDNetwork(nn.Module):
     #   base.freeze_stages(...)
 
     def freeze_stages(self, up_to: int) -> None:
-        """Freeze all stages with index < up_to."""
         for t in range(min(up_to, self.T)):
             for p in self.stages[t].parameters():
                 p.requires_grad_(False)
 
     def unfreeze_stage(self, stage_idx: int) -> None:
-        """Unfreeze stage `stage_idx` for training."""
         for p in self.stages[stage_idx].parameters():
             p.requires_grad_(True)
 
     def get_stage_params(self, stage_idx: int) -> list:
-        """Return list of trainable parameters of stage `stage_idx`."""
         return [p for p in self.stages[stage_idx].parameters()
                 if p.requires_grad]
 

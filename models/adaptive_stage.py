@@ -1,22 +1,3 @@
-"""
-models/adaptive_stage.py — Stage variants that prevent degradation with depth.
-
-Problem: The inertial PDE (u_tt + γ·u_t) creates an oscillator. At T=5 it peaks,
-beyond T=5 it diverges (PSNR drops 16.7→11.7 dB).
-
-Three fixes:
-  A. ResidualSkip — Each stage learns a residual scale α^t ∈ [0,1].
-     u^{n+1} = u^n + α^t · inertial_update(u^n, u^{n-1})
-     If α^t → 0, stage becomes a no-op (stable identity).
-
-  B. LearnedDamping — γ (damping) increases with stage index.
-     γ_t = γ_0 + learned_β · t
-     Higher damping → less oscillation → stable at depth.
-
-  C. GatedUpdate — A learned gate controls blending of inertial vs diffusive.
-     β = sigmoid(gate_param)
-     u^{n+1} = β · inertial_update + (1-β) · diffusive_update
-"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -61,7 +42,6 @@ class ResidualSkipStage(nn.Module):
 
     @property
     def alpha(self):
-        """Residual scale: α ∈ (0, 1).  α=0 → identity, α=1 → full update."""
         return torch.sigmoid(self.log_alpha)
 
     def _divergence_term(self, u, g):
@@ -133,7 +113,6 @@ class LearnedDampingStage(nn.Module):
 
     @property
     def gamma(self):
-        """γ_t = γ_0 + β · t, clamped positive."""
         g0 = self.log_gamma0.exp()
         b = self.log_beta.exp()
         return g0 + b * self.stage_idx
@@ -198,7 +177,6 @@ class GatedUpdateStage(nn.Module):
 
     @property
     def beta(self):
-        """β ∈ (0,1): 1 = full inertial, 0 = pure diffusive."""
         return torch.sigmoid(self.log_gate)
 
     def _divergence_term(self, u, g):

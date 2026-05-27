@@ -1,15 +1,3 @@
-"""
-ablate_inertia.py — Study importance of the u_tt (inertial) term.
-
-Three variants:
-  1. Full model     — u_tt + γ·u_t = div(g · φ(K*u) · K^T)   (current)
-  2. No inertia     — u_t = div(g · φ(K*u) · K^T)            (γ→∞, or drop u_prv)
-                      Equivalent: u^{n+1} = u^n + τ² · div_term(u^n)
-  3. No damping     — u_tt = div(g · φ(K*u) · K^T)           (γ=0)
-
-Compares PSNR, SSIM, and visual output on test images.
-Analyzes per-stage convergence and stability.
-"""
 import os, sys, json, argparse, time
 import numpy as np
 import torch
@@ -34,7 +22,6 @@ os.makedirs(ABL_DIR, exist_ok=True)
 
 
 def _find_best_ckpt(ckpt_dir, L):
-    """Find the best checkpoint and determine its true number of stages."""
     import re
     max_stage = 0
     best_path = None
@@ -101,7 +88,6 @@ def forward_with_variant(model, f, variant, active_stages=None):
         tau = stage.tau
         gam = stage.gamma_inertia
 
-        # Compute g and div_term (same as original)
         if stage.use_g_func:
             from models.stage import _gray_level_indicator
             g = _gray_level_indicator(
@@ -156,7 +142,7 @@ def run_ablation(L=1, ckpt_dir=CHECKPOINT_DIR, test_dir=CLEAN_TEST_DIR,
     print(f"  INERTIA (u_tt) ABLATION STUDY  L={L}")
     print(f"{'='*70}")
 
-    model = load_model(L, ckpt_dir, num_stages=None, device)
+    model = load_model(L, ckpt_dir, num_stages=None, device=device)
     model.eval()
 
     variants = ["full", "no_inertia", "no_damping"]
@@ -168,7 +154,6 @@ def run_ablation(L=1, ckpt_dir=CHECKPOINT_DIR, test_dir=CLEAN_TEST_DIR,
     colors = {"full": "steelblue", "no_inertia": "firebrick", "no_damping": "forestgreen"}
     markers = {"full": "o", "no_inertia": "s", "no_damping": "^"}
 
-    # ── 1. Full test set evaluation ───────────────────────────────────────────
     print("\n  ── Full test set evaluation ──")
     test_loader = make_test_loader(test_dir, L=L, seed=0)
     metrics = {}
@@ -177,7 +162,6 @@ def run_ablation(L=1, ckpt_dir=CHECKPOINT_DIR, test_dir=CLEAN_TEST_DIR,
         metrics[v] = {"psnr": p, "ssim": s}
         print(f"  {labels[v]:30s}  PSNR={p:.4f}  SSIM={s:.4f}")
 
-    # ── 2. Per-stage progression ─────────────────────────────────────────────
     print("\n  ── Per-stage progression ──")
     T_max = len(model.stages)
     stage_metrics = {v: {"psnr": [], "ssim": []} for v in variants}
@@ -192,28 +176,33 @@ def run_ablation(L=1, ckpt_dir=CHECKPOINT_DIR, test_dir=CLEAN_TEST_DIR,
               f"NoInertia={stage_metrics['no_inertia']['psnr'][-1]:.2f}  "
               f"NoDamping={stage_metrics['no_damping']['psnr'][-1]:.2f}")
 
-    # ── 3. Theoretical analysis: eigenvalue stability ─────────────────────────
     print("\n  ── Theoretical analysis ──")
     print(f"  τ = {TAU},  γ = {GAMMA_INERTIA}")
     print(f"  Spectral radius (full):  |λ| = 1 ± τ√(stuff)  (conditionally stable)")
     print(f"  Spectral radius (no_inertia): forward Euler, |λ| ≈ 1 + τ²·κ")
     print(f"  Spectral radius (no_damping): undamped oscillator, oscillatory")
 
-    # ── 4. Save plots ─────────────────────────────────────────────────────────
     # Bar chart
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    short_labels = {
+        "full": "Full\n(uₜₜ+γuₜ)",
+        "no_inertia": "No inertia\n(uₜ only)",
+        "no_damping": "Undamped\n(uₜₜ, γ=0)",
+    }
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
     for idx, metric in enumerate(["psnr", "ssim"]):
         ax = axes[idx]
         vals = [metrics[v][metric] for v in variants]
         bars = ax.bar(range(len(variants)), vals, color=[colors[v] for v in variants],
-                      alpha=0.85, tick_label=[labels[v] for v in variants])
-        ax.bar_label(bars, fmt=f"%.4f", fontsize=9)
+                      alpha=0.85)
+        ax.set_xticks(range(len(variants)))
+        ax.set_xticklabels([short_labels[v] for v in variants], fontsize=8)
+        ax.bar_label(bars, fmt=f"%.4f", fontsize=8)
         ax.set_ylabel(metric.upper())
         ax.set_title(f"Inertia Ablation — {metric.upper()}  (L={L})")
         ax.grid(axis="y", alpha=0.3)
     fig.tight_layout()
     path = os.path.join(ABL_DIR, f"inertia_ablation_bar_L{L}.png")
-    fig.savefig(path, dpi=130)
+    fig.savefig(path, dpi=200, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved → {path}")
 
@@ -236,7 +225,6 @@ def run_ablation(L=1, ckpt_dir=CHECKPOINT_DIR, test_dir=CLEAN_TEST_DIR,
     plt.close(fig)
     print(f"  Saved → {path}")
 
-    # ── 5. Visual comparison on first test image ──────────────────────────────
     print("\n  ── Visual comparison on test_000 ──")
     for u_gt, f in make_test_loader(test_dir, L=L, seed=0):
         u_gt = u_gt.to(device)
@@ -274,7 +262,6 @@ def run_ablation(L=1, ckpt_dir=CHECKPOINT_DIR, test_dir=CLEAN_TEST_DIR,
     plt.close(fig)
     print(f"  Saved → {path}")
 
-    # ── 6. Save metrics ──────────────────────────────────────────────────────
     json_path = os.path.join(ABL_DIR, f"inertia_ablation_L{L}.json")
     all_data = {
         "L": L,

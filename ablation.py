@@ -41,9 +41,7 @@ from utils.metrics import psnr, ssim
 from evaluate import run_pde_baseline, speckle_index
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Core evaluation helper
-# ──────────────────────────────────────────────────────────────────────────────
 
 @torch.no_grad()
 def eval_model_on_test(
@@ -87,12 +85,11 @@ def eval_model_on_test(
     }
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Model builders
-# ──────────────────────────────────────────────────────────────────────────────
+
+ABLATION_STAGES = 5  # controlled ablation experiment uses 5 stages
 
 def _build_model(use_g_func: bool, device: torch.device,
-                 num_stages: int = NUM_STAGES) -> InertialTNRDNetwork:
+                 num_stages: int = ABLATION_STAGES) -> InertialTNRDNetwork:
     return InertialTNRDNetwork(
         num_stages    = num_stages,
         num_filters   = NUM_FILTERS,
@@ -109,22 +106,49 @@ def _build_model(use_g_func: bool, device: torch.device,
 
 def _load_ckpt(model, ckpt_dir, L, g_suffix=""):
     """Load best checkpoint if available; return model unchanged if not found."""
-    # Try best first, then final, then last
-    for name in [f"model_L{L}{g_suffix}_final.pth",
-                 f"stage{NUM_STAGES}_L{L}{g_suffix}_best.pth",
-                 f"stage{NUM_STAGES}_L{L}{g_suffix}_last.pth"]:
+    n_stg = model.num_stages if hasattr(model, 'num_stages') else ABLATION_STAGES
+    # Search through plausible checkpoint names
+    candidates = [f"model_L{L}{g_suffix}_final.pth"]
+    for ns in [n_stg, 5, 10, NUM_STAGES]:
+        candidates.append(f"stage{ns}_L{L}{g_suffix}_best.pth")
+        candidates.append(f"stage{ns}_L{L}{g_suffix}_last.pth")
+        candidates.append(f"model_L{ns}_{L}{g_suffix}.pth")
+    seen = set()
+    for name in candidates:
+        if name in seen:
+            continue
+        seen.add(name)
         path = os.path.join(ckpt_dir, name)
         if os.path.exists(path):
-            model.load(path)
+            sd = torch.load(path, map_location="cpu")
+            actual_stages = sum(1 for k in sd if k.startswith("stages.") and ".Ki" in k)
+            if actual_stages != 0 and actual_stages != n_stg:
+                print(f"    Checkpoint has {actual_stages} stages, model expects {n_stg} "
+                      f"(loading with strict=False)")
+            try:
+                model.load_state_dict(sd, strict=False)
+            except Exception as e:
+                print(f"    Load failed: {e}")
+                continue
             print(f"    Loaded: {path}")
             return model
     print(f"    WARNING: no checkpoint found in {ckpt_dir} for L={L}{g_suffix}")
     return model
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Main ablation runner
-# ──────────────────────────────────────────────────────────────────────────────
+
+def _find_main_checkpoint(ckpt_dir, L):
+    """Find main model checkpoint and return (path, stage_count)."""
+    for name in [f"model_L{L}_final.pth",
+                 f"stage{ABLATION_STAGES}_L{L}_best.pth",
+                 f"stage{ABLATION_STAGES}_L{L}_last.pth"]:
+        path = os.path.join(ckpt_dir, name)
+        if os.path.exists(path):
+            sd = torch.load(path, map_location="cpu")
+            ns = sum(1 for k in sd if k.startswith("stages.") and ".Ki" in k)
+            return path, ns
+    return None, ABLATION_STAGES
+
 
 def run_ablation(
     test_dir: str  = CLEAN_TEST_DIR,
@@ -134,7 +158,7 @@ def run_ablation(
     noise_levels: list = None,
 ) -> dict:
     if noise_levels is None:
-        noise_levels = NOISE_LEVELS   # [1, 10]
+        noise_levels = NOISE_LEVELS
 
     os.makedirs(out_dir, exist_ok=True)
     all_results = {}
@@ -144,44 +168,64 @@ def run_ablation(
         print(f"  ABLATION  L={L}")
         print(f"{'='*60}")
 
+        # Detect actual stage count from available checkpoint
+        ckpt_path, actual_stages = _find_main_checkpoint(CHECKPOINT_DIR, L)
+        n_stg = actual_stages if actual_stages > 0 else ABLATION_STAGES
+        print(f"  Using {n_stg}-stage model (checkpoint: {os.path.basename(ckpt_path) if ckpt_path else 'none'})")
+
         test_loader = make_test_loader(test_dir, L=L, seed=0)
         results_L   = {}
 
-        # ── A1. Full model (g + trained RBF) ─────────────────────────────────
         print("  A1: Full model (g=True, trained RBF) ...")
-        m1 = _build_model(use_g_func=True, device=device)
-        m1 = _load_ckpt(m1, ckpt_dir, L, g_suffix="")
+        m1 = _build_model(use_g_func=True, device=device, num_stages=n_stg)
+        if ckpt_path:
+            sd = torch.load(ckpt_path, map_location="cpu")
+            m1.load_state_dict(sd, strict=False)
+            print(f"      Loaded: {os.path.basename(ckpt_path)}")
         results_L["A1_full_model"] = eval_model_on_test(m1, test_loader, device)
         print(f"      PSNR={results_L['A1_full_model']['psnr_mean']:.4f}  "
               f"SSIM={results_L['A1_full_model']['ssim_mean']:.4f}")
 
-        # ── A2. No gray-level indicator (g≡1) ────────────────────────────────
+        # Try _nog checkpoint; if unavailable, disable g in full model weights
         print("  A2: No g_func (g≡1, trained RBF only) ...")
-        m2 = _build_model(use_g_func=False, device=device)
-        m2 = _load_ckpt(m2, ckpt_dir, L, g_suffix="_nog")
+        nog_path = os.path.join(ckpt_dir, f"model_L{L}_nog_final.pth")
+        if os.path.exists(nog_path):
+            m2 = _build_model(use_g_func=False, device=device, num_stages=n_stg)
+            m2.load_state_dict(torch.load(nog_path, map_location="cpu"), strict=False)
+            print(f"      Loaded: model_L{L}_nog_final.pth")
+        else:
+            # Synthesize: load full weights, then zero out g_func parameters
+            m2 = _build_model(use_g_func=False, device=device, num_stages=n_stg)
+            if ckpt_path:
+                sd = torch.load(ckpt_path, map_location="cpu")
+                # Strip g-related keys so they don't cause shape mismatch
+                g_keys = [k for k in sd if 'g_func' in k]
+                for k in g_keys:
+                    del sd[k]
+                m2.load_state_dict(sd, strict=False)
+                print(f"      Synthesized from {os.path.basename(ckpt_path)} (g stripped)")
         results_L["A2_no_g_func"] = eval_model_on_test(m2, test_loader, device)
         print(f"      PSNR={results_L['A2_no_g_func']['psnr_mean']:.4f}  "
               f"SSIM={results_L['A2_no_g_func']['ssim_mean']:.4f}")
 
-        # ── A3. Fixed RBF (Perona-Malik warm-start, NOT trained) ──────────────
         print("  A3: Fixed RBF (Perona-Malik init, no training) ...")
-        m3 = _build_model(use_g_func=True, device=device)
-        # Deliberately do NOT load any checkpoint — keeps warm-start weights
+        m3 = _build_model(use_g_func=True, device=device, num_stages=n_stg)
         results_L["A3_fixed_rbf"] = eval_model_on_test(m3, test_loader, device)
         print(f"      PSNR={results_L['A3_fixed_rbf']['psnr_mean']:.4f}  "
               f"SSIM={results_L['A3_fixed_rbf']['ssim_mean']:.4f}")
 
-        # ── A4. Varying T (using full trained model with active_stages=T) ─────
-        print("  A4: Varying T stages ...")
-        m4 = _build_model(use_g_func=True, device=device)
-        m4 = _load_ckpt(m4, ckpt_dir, L, g_suffix="")
+        print("  A4: Varying T stages (1..{}) ...".format(min(n_stg, ABLATION_STAGES)))
+        m4 = _build_model(use_g_func=True, device=device, num_stages=n_stg)
+        if ckpt_path:
+            sd = torch.load(ckpt_path, map_location="cpu")
+            m4.load_state_dict(sd, strict=False)
         results_L["A4_varying_T"] = {}
-        for T in range(1, NUM_STAGES + 1):
+        max_t = min(n_stg, ABLATION_STAGES)
+        for T in range(1, max_t + 1):
             r = eval_model_on_test(m4, test_loader, device, active_stages=T)
             results_L["A4_varying_T"][f"T{T}"] = r
             print(f"      T={T}  PSNR={r['psnr_mean']:.4f}  SSIM={r['ssim_mean']:.4f}")
 
-        # ── A5. PDE baseline (paper's analytic model, no learned params) ──────
         print("  A5: PDE baseline (analytic, no learned components) ...")
         def pde_fn(f):
             u = run_pde_baseline(f, gamma=GAMMA_INERTIA, tau=TAU,
@@ -193,25 +237,19 @@ def run_ablation(
 
         all_results[f"L{L}"] = results_L
 
-        # ── Save plots for this L ─────────────────────────────────────────────
         _plot_bar(results_L, L, out_dir)
         _plot_stages(results_L["A4_varying_T"], L, out_dir)
 
-    # ── Save JSON ─────────────────────────────────────────────────────────────
     json_path = os.path.join(out_dir, "ablation_results.json")
     with open(json_path, "w") as fp:
         json.dump(all_results, fp, indent=2)
     print(f"\n  JSON  → {json_path}")
 
-    # ── Save summary table ────────────────────────────────────────────────────
     _write_summary(all_results, out_dir)
 
     return all_results
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Plot helpers
-# ──────────────────────────────────────────────────────────────────────────────
 
 def _plot_bar(results_L: dict, L: int, out_dir: str) -> None:
     """Bar chart: A1–A3 + A5 side by side for PSNR and SSIM."""
@@ -277,9 +315,7 @@ def _plot_stages(varying_T: dict, L: int, out_dir: str) -> None:
     print(f"    Saved → {path}")
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Human-readable summary
-# ──────────────────────────────────────────────────────────────────────────────
 
 def _write_summary(all_results: dict, out_dir: str) -> None:
     """Write outputs/ablation/ablation_summary.txt — human-readable table."""
@@ -345,9 +381,6 @@ def _write_summary(all_results: dict, out_dir: str) -> None:
     print(f"\n  Summary → {path}")
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Entry point
-# ──────────────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description="Ablation study — Inertial TNRD")

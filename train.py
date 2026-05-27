@@ -1,24 +1,3 @@
-"""
-train.py  —  Greedy stage-wise training for Inertial TNRD Despeckling.
-=======================================================================
-IMPROVEMENTS OVER ORIGINAL (for better L=1 results):
-
-  1. CURRICULUM TRAINING (train_greedy for L=1):
-     Earlier stages train on easier noise (L=5, L=3) before harder L=1.
-     Controlled by config.CURRICULUM_L1_SCHEDULE.
-     Each stage gets a fresh dataloader matching its curriculum L.
-     For L=10: no curriculum, all stages train on L=10 as before.
-
-  2. MORE STAGES (NUM_STAGES=10 in config):
-     train_stage() is unchanged — greedy loop just runs more times.
-     Compatible with original checkpoint naming (stage1..stage10).
-
-  3. LONGER EPOCHS (NUM_EPOCHS=150 in config):
-     No code change needed — train_stage() reads from config.
-
-  All original bug fixes (BUG 2, 5) preserved.
-"""
-
 import os
 import sys
 import json
@@ -46,13 +25,11 @@ from config import (
 from models import InertialTNRDNetwork
 from dataset import make_train_loader, make_val_loader
 from utils.visualization import plot_loss_curve, plot_psnr_curve, plot_influence_functions
+from utils.losses import edge_preserving_loss
 
 _WARMUP_EPOCHS = 3
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Metric helpers
-# ──────────────────────────────────────────────────────────────────────────────
 
 def _psnr255(pred: torch.Tensor, target: torch.Tensor) -> float:
     with torch.no_grad():
@@ -72,11 +49,9 @@ def _ssim255(pred: torch.Tensor, target: torch.Tensor) -> float:
     return float(sk_ssim(p.squeeze(), t.squeeze(), data_range=255.0))
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Training one epoch
-# ──────────────────────────────────────────────────────────────────────────────
 
-def train_one_epoch(model, loader, optimizer, device, active_stages) -> float:
+def train_one_epoch(model, loader, optimizer, device, active_stages,
+                    edge_weight=0.0) -> float:
     model.train()
     criterion  = nn.MSELoss()
     total_loss = 0.0
@@ -87,6 +62,8 @@ def train_one_epoch(model, loader, optimizer, device, active_stages) -> float:
         optimizer.zero_grad()
         u_pred, _ = model(f, active_stages=active_stages)
         loss = criterion(u_pred, u_gt)
+        if edge_weight > 0:
+            loss = loss + edge_preserving_loss(u_pred, u_gt, weight=edge_weight)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(
             [p for p in model.parameters() if p.requires_grad],
@@ -98,9 +75,7 @@ def train_one_epoch(model, loader, optimizer, device, active_stages) -> float:
     return total_loss / max(len(loader), 1)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Validation
-# ──────────────────────────────────────────────────────────────────────────────
 
 @torch.no_grad()
 def validate(model, loader, device, active_stages) -> tuple:
@@ -118,23 +93,19 @@ def validate(model, loader, device, active_stages) -> tuple:
     return float(np.mean(psnr_list)), float(np.mean(ssim_list))
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # LR warmup helper
-# ──────────────────────────────────────────────────────────────────────────────
 
 def _set_lr(optimizer, lr: float) -> None:
     for pg in optimizer.param_groups:
         pg["lr"] = lr
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Train one stage (greedy) — UNCHANGED from original
-# ──────────────────────────────────────────────────────────────────────────────
 
 def train_stage(
     model, stage_idx, train_loader, val_loader, device,
     num_epochs=NUM_EPOCHS, lr=LR, L=1,
-    use_g_func=True,
+    use_g_func=True, edge_weight=0.0,
     save_dir=CHECKPOINT_DIR,
     plot_dir=PLOT_DIR,
 ) -> dict:
@@ -178,7 +149,8 @@ def train_stage(
         elif epoch == _WARMUP_EPOCHS + 1:
             _set_lr(optimizer, lr)
 
-        train_loss = train_one_epoch(model, train_loader, optimizer, device, active)
+        train_loss = train_one_epoch(model, train_loader, optimizer, device, active,
+                                       edge_weight=edge_weight)
         train_psnr_val = 10.0 * np.log10(255.0 ** 2 / max(train_loss, 1e-10))
 
         # BUG 5 FIX: validate every epoch (was erroneously commented out)
@@ -227,9 +199,7 @@ def train_stage(
     return history
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Full greedy training loop — WITH CURRICULUM for L=1
-# ──────────────────────────────────────────────────────────────────────────────
 
 def _find_resume_stage(L, num_stages, save_dir, suffix):
     final_path = os.path.join(save_dir, f"model_L{L}{suffix}_final.pth")
@@ -259,7 +229,10 @@ def train_greedy(
     L=1, num_stages=NUM_STAGES, num_epochs=NUM_EPOCHS,
     device=DEVICE, save_dir=CHECKPOINT_DIR, plot_dir=PLOT_DIR,
     num_workers=None, multi_gpu=True, use_g_func=True, resume=False,
+    edge_weight=0.0, multi_scale=False,
 ):
+    if multi_scale:
+        from models.multi_scale_wrapper import MultiScaleTNRDWrapper
     if num_workers is None:
         num_workers = DATALOADER_NUM_WORKERS
 
@@ -313,11 +286,14 @@ def train_greedy(
     else:
         model.print_param_summary()
 
+    if multi_scale:
+        model = MultiScaleTNRDWrapper(model)
+        print(f"  Multi-scale enabled: scales={model.scales}")
+
     if multi_gpu and device.type == "cuda" and torch.cuda.device_count() > 1:
         model = nn.DataParallel(model)
         print(f"  DataParallel across {torch.cuda.device_count()} GPUs")
 
-    # ── Always keep a val loader on the TARGET L for honest PSNR tracking ──
     val_loader_target = make_val_loader(
         CLEAN_VAL_DIR, L=L,
         batch_size=1, patch_size=PATCH_SIZE, seed=42,
@@ -329,7 +305,6 @@ def train_greedy(
 
     for stage_idx in range(start_stage, num_stages):
 
-        # ── CURRICULUM: pick train noise level for this stage ────────────────
         if L == 1:
             train_L = CURRICULUM_L1_SCHEDULE[stage_idx] \
                       if stage_idx < len(CURRICULUM_L1_SCHEDULE) else 1
@@ -359,6 +334,7 @@ def train_greedy(
             device=device, num_epochs=num_epochs,
             lr=LR, L=L,
             use_g_func=use_g_func,
+            edge_weight=edge_weight,
             save_dir=save_dir, plot_dir=plot_dir,
         )
         all_history[f"stage_{stage_idx+1}"] = hist
@@ -382,9 +358,6 @@ def train_greedy(
     return model, old_hist
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Entry point
-# ──────────────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description="Train Inertial TNRD Despeckling")
@@ -401,6 +374,10 @@ def main():
                         help="Resume training from last checkpoint")
     parser.add_argument("--pipeline", action="store_true",
                         help="Run/resume all L values in sequence (1, 10)")
+    parser.add_argument("--edge-weight", type=float, default=0.0,
+                        help="Weight for gradient-magnitude edge loss (default 0)")
+    parser.add_argument("--multi-scale", action="store_true",
+                        help="Enable multi-scale processing (MSND-style)")
     args = parser.parse_args()
 
     device = DEVICE
@@ -412,27 +389,21 @@ def main():
 
     use_g = not args.no_g
 
+    common = dict(
+        device=device, num_workers=args.workers,
+        multi_gpu=not args.no_multi_gpu, use_g_func=use_g, resume=args.resume,
+        edge_weight=args.edge_weight, multi_scale=args.multi_scale,
+    )
+
     if args.pipeline:
         for L in [1, 10]:
             ns = 10 if L == 1 else min(args.stages, 5)
-            train_greedy(
-                L=L, num_stages=ns, num_epochs=args.epochs,
-                device=device, num_workers=args.workers,
-                multi_gpu=not args.no_multi_gpu, use_g_func=use_g, resume=True,
-            )
+            train_greedy(L=L, num_stages=ns, num_epochs=args.epochs, **common)
     elif args.both:
         for L in NOISE_LEVELS:
-            train_greedy(
-                L=L, num_stages=args.stages, num_epochs=args.epochs,
-                device=device, num_workers=args.workers,
-                multi_gpu=not args.no_multi_gpu, use_g_func=use_g, resume=args.resume,
-            )
+            train_greedy(L=L, num_stages=args.stages, num_epochs=args.epochs, **common)
     else:
-        train_greedy(
-            L=args.L, num_stages=args.stages, num_epochs=args.epochs,
-            device=device, num_workers=args.workers,
-            multi_gpu=not args.no_multi_gpu, use_g_func=use_g, resume=args.resume,
-        )
+        train_greedy(L=args.L, num_stages=args.stages, num_epochs=args.epochs, **common)
 
 
 if __name__ == "__main__":

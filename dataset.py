@@ -12,9 +12,7 @@ from utils.noise import add_gamma_noise
 from config import DEVICE, DATALOADER_NUM_WORKERS
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Helpers
-# ──────────────────────────────────────────────────────────────────────────────
 
 _EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 
@@ -39,9 +37,7 @@ def _list_images(folder: str) -> list:
     )
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # SpeckleDataset
-# ──────────────────────────────────────────────────────────────────────────────
 
 class SpeckleDataset(Dataset):
     
@@ -87,7 +83,6 @@ class SpeckleDataset(Dataset):
 
         return u, f   # clean, noisy — both (1, H, W) in [0, 255]
 
-    # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _random_crop(self, u: torch.Tensor) -> torch.Tensor:
         """Random crop to (1, patch_size, patch_size)."""
@@ -115,9 +110,7 @@ class SpeckleDataset(Dataset):
         return u
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Pre-generated noisy dataset (faster I/O for large training runs)
-# ──────────────────────────────────────────────────────────────────────────────
 
 class PreGeneratedSpeckleDataset(Dataset):
     """
@@ -181,9 +174,7 @@ class PreGeneratedSpeckleDataset(Dataset):
         return u, f
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Factory helpers
-# ──────────────────────────────────────────────────────────────────────────────
 
 def make_train_loader(clean_dir: str, L: int, batch_size: int = 4,
                       patch_size: int = 64, num_workers: int = None,

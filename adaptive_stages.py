@@ -49,7 +49,6 @@ def evaluate_all_stages(model, loader, device, variant="full", max_stages=None):
         u_gt = u_gt.to(device)
         f = f.to(device)
 
-        # Run all stages, collect intermediate outputs
         T = max_stages
         u_prv = f.clone()
         u_cur = f.clone()
@@ -80,7 +79,6 @@ def evaluate_all_stages(model, loader, device, variant="full", max_stages=None):
             u_prv = u_cur
             u_cur = u_nxt
 
-        # Evaluate each T
         per_image[img_name] = {}
         for t in range(T):
             u_pred = stage_outputs[t]

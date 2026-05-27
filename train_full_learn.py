@@ -32,6 +32,7 @@ from config import (
 from models import FullLearnInertialTNRDNetwork
 from dataset import make_train_loader, make_val_loader
 from utils.visualization import plot_loss_curve, plot_psnr_curve, plot_influence_functions
+from utils.losses import edge_preserving_loss
 
 _WARMUP_EPOCHS = 3
 SUFFIX = "_fulllearn"
@@ -54,7 +55,8 @@ def _ssim255(pred, target):
     return float(sk_ssim(p.squeeze(), t.squeeze(), data_range=255.0))
 
 
-def train_one_epoch(model, loader, optimizer, device, active_stages):
+def train_one_epoch(model, loader, optimizer, device, active_stages,
+                    edge_weight=0.0):
     model.train()
     criterion = nn.MSELoss()
     total_loss = 0.0
@@ -64,6 +66,8 @@ def train_one_epoch(model, loader, optimizer, device, active_stages):
         optimizer.zero_grad()
         u_pred, _ = model(f, active_stages=active_stages)
         loss = criterion(u_pred, u_gt)
+        if edge_weight > 0:
+            loss = loss + edge_preserving_loss(u_pred, u_gt, weight=edge_weight)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(
             [p for p in model.parameters() if p.requires_grad],
@@ -93,7 +97,7 @@ def _set_lr(optimizer, lr):
 
 
 def train_stage(model, stage_idx, train_loader, val_loader, device,
-                num_epochs=NUM_EPOCHS, lr=LR, L=1,
+                num_epochs=NUM_EPOCHS, lr=LR, L=1, edge_weight=0.0,
                 save_dir=CHECKPOINT_DIR, plot_dir=PLOT_DIR):
     os.makedirs(save_dir, exist_ok=True)
     os.makedirs(plot_dir, exist_ok=True)
@@ -124,7 +128,8 @@ def train_stage(model, stage_idx, train_loader, val_loader, device,
         elif epoch == _WARMUP_EPOCHS + 1:
             _set_lr(optimizer, lr)
 
-        train_loss = train_one_epoch(model, train_loader, optimizer, device, active)
+        train_loss = train_one_epoch(model, train_loader, optimizer, device, active,
+                                       edge_weight=edge_weight)
         val_psnr, val_ssim = validate(model, val_loader, device, active)
 
         if epoch > _WARMUP_EPOCHS:
@@ -146,7 +151,6 @@ def train_stage(model, stage_idx, train_loader, val_loader, device,
               f"lr={optimizer.param_groups[0]['lr']:.2e}  "
               f"time={time.time()-t0:.1f}s{params_str}")
 
-        # Save best checkpoint
         if val_psnr > best_psnr:
             best_psnr = val_psnr
             best_epoch = epoch
@@ -157,7 +161,6 @@ def train_stage(model, stage_idx, train_loader, val_loader, device,
             best_path = save_path
             print(f"  *** New best val PSNR: {val_psnr:.4f} (ep {epoch}) → {save_path}")
 
-        # Save last checkpoint
         last_path = os.path.join(
             save_dir,
             f"stage{stage_idx+1}_L{L}_last{SUFFIX}.pth")
@@ -192,8 +195,12 @@ def _find_resume_stage(L, num_stages, save_dir=CHECKPOINT_DIR):
 
 
 def train(L=1, num_stages=NUM_STAGES, epochs=NUM_EPOCHS, workers=None,
-          save_dir=CHECKPOINT_DIR, plot_dir=PLOT_DIR, resume=False):
+          save_dir=CHECKPOINT_DIR, plot_dir=PLOT_DIR, resume=False,
+          edge_weight=0.0, multi_scale=False):
     device = DEVICE
+
+    if multi_scale:
+        from models.multi_scale_wrapper import MultiScaleTNRDWrapper
 
     if resume:
         start_stage, load_path = _find_resume_stage(L, num_stages, save_dir)
@@ -226,6 +233,10 @@ def train(L=1, num_stages=NUM_STAGES, epochs=NUM_EPOCHS, workers=None,
         model.to(device)
         print(f"  Loaded checkpoint: {load_path}")
 
+    if multi_scale:
+        model = MultiScaleTNRDWrapper(model)
+        print(f"  Multi-scale enabled: scales={model.scales}")
+
     n_total = sum(p.numel() for p in model.parameters() if p.requires_grad)
     n_fixed = sum(p.numel() for p in model.parameters() if not p.requires_grad)
     print(f"  Params: {n_total:,} trainable  |  {n_fixed:,} fixed")
@@ -255,15 +266,14 @@ def train(L=1, num_stages=NUM_STAGES, epochs=NUM_EPOCHS, workers=None,
         hist, best_path = train_stage(
             model, stage_idx, train_loader_cur, val_loader_cur, device,
             num_epochs=epochs, lr=LR, L=L_curriculum,
+            edge_weight=edge_weight,
             save_dir=save_dir, plot_dir=plot_dir)
         history_all[stage_idx] = hist
 
-    # Save final model
     final_path = os.path.join(save_dir, f"model_L{L}_final{SUFFIX}.pth")
     torch.save(model.state_dict(), final_path)
     print(f"\n  Final model → {final_path}")
 
-    # Save training history
     hist_path = os.path.join(save_dir, f"training_history_L{L}{SUFFIX}.json")
     old_hist = {}
     if resume and os.path.isfile(hist_path):
@@ -290,20 +300,27 @@ def main():
                         help="Resume training from last checkpoint")
     parser.add_argument("--pipeline", action="store_true",
                         help="Run/resume all L values in sequence (1, 10)")
+    parser.add_argument("--edge-weight", type=float, default=0.0,
+                        help="Weight for gradient-magnitude edge loss (default 0)")
+    parser.add_argument("--multi-scale", action="store_true",
+                        help="Enable multi-scale processing (MSND-style)")
     args = parser.parse_args()
+
+    common = dict(
+        workers=args.workers, resume=args.resume,
+        edge_weight=args.edge_weight, multi_scale=args.multi_scale,
+    )
 
     if args.pipeline:
         for L in [1, 10]:
             ns = 10 if L == 1 else min(args.stages, 5)
-            train(L=L, num_stages=ns, epochs=args.epochs,
-                  workers=args.workers, resume=True)
+            train(L=L, num_stages=ns, epochs=args.epochs, **common)
     elif args.both:
         for L in [10, 1]:
             train(L=L, num_stages=min(args.stages, 5) if L == 10 else args.stages,
-                  epochs=args.epochs, workers=args.workers, resume=args.resume)
+                  epochs=args.epochs, **common)
     else:
-        train(L=args.L, num_stages=args.stages,
-              epochs=args.epochs, workers=args.workers, resume=args.resume)
+        train(L=args.L, num_stages=args.stages, epochs=args.epochs, **common)
 
 
 if __name__ == "__main__":

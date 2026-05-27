@@ -42,9 +42,7 @@ from utils.visualization import (
 from utils.noise import add_gamma_noise
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # PDE baseline (paper's own analytic model, no learned RBF)
-# ──────────────────────────────────────────────────────────────────────────────
 
 def run_pde_baseline(
     f:          torch.Tensor,   # (1,1,H,W) noisy input in [0,255]
@@ -130,9 +128,7 @@ def run_pde_baseline(
     return I_cur
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Speckle Index
-# ──────────────────────────────────────────────────────────────────────────────
 
 def speckle_index(img: torch.Tensor) -> float:
     """SI = std(I)/mean(I)  — paper §5.1."""
@@ -143,9 +139,6 @@ def speckle_index(img: torch.Tensor) -> float:
     return float(arr.std() / m)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Evaluate one model on one test image
-# ──────────────────────────────────────────────────────────────────────────────
 
 @torch.no_grad()
 def evaluate_image(
@@ -206,9 +199,6 @@ def evaluate_image(
     }
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Main evaluation loop
-# ──────────────────────────────────────────────────────────────────────────────
 
 def evaluate_all(
     ckpt_dir:   str  = CHECKPOINT_DIR,
@@ -232,7 +222,6 @@ def evaluate_all(
         print(f"  Evaluating  L={L}")
         print(f"{'='*60}")
 
-        # Load learned model
         model = InertialTNRDNetwork(
             num_stages    = NUM_STAGES,
             num_filters   = NUM_FILTERS,
@@ -264,14 +253,12 @@ def evaluate_all(
             img_idx = len(table_rows)
             img_name = f"test_{img_idx:03d}"
 
-            # ── Learned model ──────────────────────────────────────────────
             res_learned = evaluate_image(
                 model, u_gt, f, device,
                 name=f"learned_{img_name}",
                 L=L, save_dir=out_dir,
             )
 
-            # ── PDE baseline (analytic, no learned params) ─────────────────
             f_dev = f.to(device)
             u_pde = run_pde_baseline(f_dev, gamma=GAMMA_INERTIA, tau=TAU,
                                      nu=NU, K_thresh=K, sigma=SIGMA_SMOOTH)
@@ -337,9 +324,6 @@ def _write_comparison_table(rows: list, L: int, tables_dir: str):
     print(f"  Table saved → {path}")
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Entry point
-# ──────────────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate Inertial TNRD model")

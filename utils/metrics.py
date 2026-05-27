@@ -33,7 +33,6 @@ def paired_ttest(
     psnr_method1: list,
     psnr_method2: list,
 ) -> dict:
-    """Paired t-test between two methods across images. Returns t-stat and p-value."""
     arr1 = np.array(psnr_method1)
     arr2 = np.array(psnr_method2)
     diff = arr1 - arr2

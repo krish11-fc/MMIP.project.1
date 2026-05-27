@@ -23,3 +23,6 @@ Thumbs.db
 *.swo
 *~
 .env
+
+# ── Stray mount (not part of project) ──
+mnt/

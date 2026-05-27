@@ -16,10 +16,13 @@ from config import (
     NOISE_LEVELS_ALL,
     DATALOADER_NUM_WORKERS, VAL_MAX_IMAGES, WARMUP_EPOCHS,
 )
-from models.noise_conditional_network import NoiseConditionalTNRDNetwork
+from models.noise_conditional_network_v2 import NoiseConditionalTNRDNetworkV2
 from dataset import make_mixed_train_loader, make_mixed_val_loader
 from utils.visualization import plot_loss_curve, plot_psnr_curve
 from utils.losses import edge_preserving_loss
+
+SUFFIX = "_nctdn_v2"
+FILTER_REG = 1e-4
 
 
 def _psnr255(pred, target):
@@ -39,19 +42,32 @@ def _ssim255(pred, target):
     return float(sk_ssim(p.squeeze(), t.squeeze(), data_range=255.0))
 
 
+def noise_weight(L: torch.Tensor) -> torch.Tensor:
+    inv = 1.0 / L.float()
+    return inv / inv.mean()
+
+
 def train_one_epoch(model, loader, optimizer, device, active_stages,
                     edge_weight=0.0):
     model.train()
-    criterion = nn.MSELoss()
     total_loss = 0.0
     for u_gt, f, L_batch in loader:
         u_gt, f = u_gt.to(device), f.to(device)
         L_batch = L_batch.to(device)
         optimizer.zero_grad()
         u_pred, _ = model(f, L=L_batch, active_stages=active_stages)
-        loss = criterion(u_pred, u_gt)
+
+        mse = (u_pred - u_gt) ** 2
+        w = noise_weight(L_batch)
+        loss = (mse * w.view(-1, 1, 1, 1)).mean()
+
         if edge_weight > 0:
             loss = loss + edge_preserving_loss(u_pred, u_gt, weight=edge_weight)
+
+        reg = sum(s.l1_norm_filter_bank() for s in model.modules()
+                  if hasattr(s, 'l1_norm_filter_bank'))
+        loss = loss + FILTER_REG * reg
+
         loss.backward()
         torch.nn.utils.clip_grad_norm_(
             [p for p in model.parameters() if p.requires_grad], max_norm=GRAD_CLIP)
@@ -93,7 +109,7 @@ def train_stage(model, stage_idx, train_loader, val_loaders, device,
     n_trainable = sum(p.numel() for p in trainable)
 
     print(f"\n{'='*60}")
-    print(f"  NCTDN Mixed — Stage {stage_idx+1}/{base.T}")
+    print(f"  NCTDN-V2 Mixed — Stage {stage_idx+1}/{base.T}")
     print(f"  trainable params: {n_trainable:,}")
     print(f"  epochs={num_epochs}  lr={lr}")
     print(f"{'='*60}")
@@ -134,11 +150,11 @@ def train_stage(model, stage_idx, train_loader, val_loaders, device,
 
             if avg_psnr > best_avg:
                 best_avg = avg_psnr
-                base.save(os.path.join(save_dir, f"nctdn_stage{stage_idx+1}_best.pth"))
+                base.save(os.path.join(save_dir, f"nctdn_v2_stage{stage_idx+1}_best{SUFFIX}.pth"))
         elif epoch > WARMUP_EPOCHS:
             scheduler.step()
 
-    base.save(os.path.join(save_dir, f"nctdn_stage{stage_idx+1}_last.pth"))
+    base.save(os.path.join(save_dir, f"nctdn_v2_stage{stage_idx+1}_last{SUFFIX}.pth"))
     return history
 
 
@@ -146,16 +162,26 @@ def train_mixed(num_stages=NUM_STAGES, num_epochs=NUM_EPOCHS,
                 device=DEVICE, save_dir=CHECKPOINT_DIR, plot_dir=PLOT_DIR,
                 num_workers=None, multi_gpu=True, edge_weight=0.0,
                 multi_scale=False):
+    global SUFFIX
+    if multi_scale and edge_weight > 0:
+        SUFFIX = "_nctdn_v3_ms_edge"
+    elif multi_scale:
+        SUFFIX = "_nctdn_v3_ms"
+    elif edge_weight > 0:
+        SUFFIX = "_nctdn_v3_edge"
+
     if num_workers is None:
         num_workers = DATALOADER_NUM_WORKERS
 
     print(f"\n{'#'*60}")
-    print(f"  NCTDN MIXED-NOISE TRAINING — single model for all L")
+    print(f"  NCTDN-V2 MIXED-NOISE TRAINING — single model for all L")
     print(f"  Noise levels: {NOISE_LEVELS_ALL}")
     print(f"  T={num_stages}  epochs={num_epochs}")
+    print(f"  edge_weight={edge_weight}  multi_scale={multi_scale}  suffix={SUFFIX}")
+    print(f"  Changes: learned filters | learned g | cond PDE params | L-weighted loss")
     print(f"{'#'*60}")
 
-    model = NoiseConditionalTNRDNetwork(
+    model = NoiseConditionalTNRDNetworkV2(
         num_stages=num_stages, num_filters=NUM_FILTERS,
         filter_size=FILTER_SIZE, gamma_inertia=GAMMA_INERTIA,
         sigma_smooth=SIGMA_SMOOTH, nu=NU, K_thresh=K,
@@ -163,6 +189,7 @@ def train_mixed(num_stages=NUM_STAGES, num_epochs=NUM_EPOCHS,
         embed_dim=EMBED_DIM, num_noise_levels=NUM_NOISE_LEVELS,
         device=device,
     ).to(device)
+
     model.print_param_summary()
 
     if multi_scale:
@@ -196,11 +223,11 @@ def train_mixed(num_stages=NUM_STAGES, num_epochs=NUM_EPOCHS,
         all_history[f"stage_{stage_idx+1}"] = hist
 
     base = model.module if isinstance(model, nn.DataParallel) else model
-    final_path = os.path.join(save_dir, "nctdn_model_mixed_final.pth")
+    final_path = os.path.join(save_dir, f"nctdn_v2_model_mixed_final{SUFFIX}.pth")
     base.save(final_path)
     print(f"\n  Final model -> {final_path}")
 
-    hist_path = os.path.join(save_dir, "nctdn_training_history_mixed.json")
+    hist_path = os.path.join(save_dir, f"nctdn_v2_training_history_mixed{SUFFIX}.json")
     with open(hist_path, "w") as fp:
         json.dump(all_history, fp, indent=2)
     print(f"  History -> {hist_path}")
@@ -209,7 +236,7 @@ def train_mixed(num_stages=NUM_STAGES, num_epochs=NUM_EPOCHS,
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train NCTDN mixed-noise")
+    parser = argparse.ArgumentParser(description="Train NCTDN-V2 mixed-noise")
     parser.add_argument("--stages", type=int, default=NUM_STAGES)
     parser.add_argument("--epochs", type=int, default=NUM_EPOCHS)
     parser.add_argument("--workers", type=int, default=None)

@@ -1,17 +1,3 @@
-"""
-models/stage.py — Single unrolled step of the inertial telegraph diffusion PDE.
-
-Implements paper §4 eq. d:
-    (1 + γτ) u^{n+1} = (2 + γτ) u^n  -  u^{n-1}
-                       + τ² · Σ_i  K_i^T [ φ_i(K_i * u^n) · g(u_ξ, |∇u_ξ|) ]
-
-Fixed  : K_i (filter bank), γ (damping)
-Learned: φ_i (RBF weights), λ^t (fidelity, inactive per paper h=0)
-
-BUG 6 FIX: blur_kernel registered as buffer → moved with model.to(device),
-           eliminating per-forward CPU→GPU transfer.
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -21,7 +7,6 @@ from utils.rbf import RBFInfluenceFunction
 
 
 def _make_gaussian_kernel(sigma: float, size: int) -> torch.Tensor:
-    """(1,1,size,size) Gaussian kernel, float32, CPU."""
     half = size // 2
     t    = torch.arange(-half, half + 1, dtype=torch.float32)
     g1d  = torch.exp(-t ** 2 / (2.0 * sigma ** 2))
@@ -69,7 +54,6 @@ def _gray_level_indicator(
 
 
 class InertialDiffusionStage(nn.Module):
-    """One unrolled stage of the inertial telegraph diffusion PDE."""
 
     def __init__(
         self,
@@ -111,7 +95,6 @@ class InertialDiffusionStage(nn.Module):
         return F.softplus(self.log_lambda)
 
     def _divergence_term(self, u: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
-        """Σ_i  K_i^T ( φ_i(K_i * u) · g )"""
         pad = self.Ki.shape[-1] // 2
         out = torch.zeros_like(u)
         for i in range(self.Nk):

@@ -43,7 +43,6 @@ def build_dct_filters(
     m   = filter_size
     N   = m * m  # total pixels per filter
 
-    # Build all DCT-II 2D basis functions (vectorised)
     idx  = np.arange(m, dtype=np.float64)
     # 1-D DCT-II basis: cos(π/m * (k + 0.5) * n) for k,n = 0..m-1
     basis1d = np.cos(np.pi / m * np.outer(np.arange(m), idx + 0.5))  # (m, m)

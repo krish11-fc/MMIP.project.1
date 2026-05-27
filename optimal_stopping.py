@@ -53,7 +53,6 @@ OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs", "o
 os.makedirs(OUT_DIR, exist_ok=True)
 
 
-# ── Model Loading ──────────────────────────────────────────────────────────────
 
 def _find_best_ckpt(ckpt_dir, L):
     import re
@@ -94,7 +93,6 @@ def load_model(L, ckpt_dir, device=DEVICE):
     return model
 
 
-# ── Forward pass collecting all signals ───────────────────────────────────────
 
 @torch.no_grad()
 def collect_signals(model, f):
@@ -145,7 +143,6 @@ def collect_signals(model, f):
             "resid": resid_list, "hf": hf_list}
 
 
-# ── Stopping Criteria ──────────────────────────────────────────────────────────
 
 def _argmin_first_local(xs):
     for i in range(1, len(xs) - 1):
@@ -166,7 +163,6 @@ def stop_hf_min(hf_history):
     return _argmin_first_local(hf_history)
 
 
-# ── Von Neumann Stability Analysis ──────────────────────────────────────────
 
 @torch.no_grad()
 def compute_amplification_factor(model, img_size=64):
@@ -182,18 +178,15 @@ def compute_amplification_factor(model, img_size=64):
     
     Returns (freqs, spec_radii, stable_mask)
     """
-    # Get filters from stage 0 (they're the same across all stages)
     Ki = model.stages[0].Ki.cpu().numpy()  # (Nk, 1, m, m)
     Nk, _, m, m = Ki.shape
     tau = model.stages[0].tau
     gam = model.stages[0].gamma_inertia
 
-    # Compute 2D DFT of each filter
     freqs = np.fft.fftfreq(img_size)
     kx, ky = np.meshgrid(freqs, freqs)
     k_mag = np.sqrt(kx**2 + ky**2)
 
-    # Compute filter symbol
     sum_ki_sq = np.zeros((img_size, img_size), dtype=np.complex128)
     for i in range(Nk):
         K_hat = np.fft.fft2(Ki[i, 0], s=(img_size, img_size))
@@ -224,7 +217,6 @@ def compute_amplification_factor(model, img_size=64):
     return k_mag, spec_rad, stable, L_hat
 
 
-# ── Main Analysis ──────────────────────────────────────────────────────────────
 
 @torch.no_grad()
 def analyze(L=1, ckpt_dir=CHECKPOINT_DIR, test_dir=CLEAN_TEST_DIR, device=DEVICE):
@@ -270,7 +262,6 @@ def analyze(L=1, ckpt_dir=CHECKPOINT_DIR, test_dir=CLEAN_TEST_DIR, device=DEVICE
     print(f"  Images: {len(images)},  Oracle T* range: [{oracle_Ts.min()}, {oracle_Ts.max()}],  "
           f"mean={oracle_Ts.mean():.2f}")
 
-    # ── Stopping methods ────────────────────────────────────────────────────
     methods = {
         "Min Update": lambda s: stop_update_min(s["update"]),
         "Min Diffusion": lambda s: stop_div_min(s["div"]),
@@ -295,7 +286,6 @@ def analyze(L=1, ckpt_dir=CHECKPOINT_DIR, test_dir=CLEAN_TEST_DIR, device=DEVICE
             ps = [float(psnr(d["sig"]["u"][T], d["u_gt"]).item()) for d in images]
             fixed_baselines[f"Fixed T={T}"] = ps
 
-    # ── Print ────────────────────────────────────────────────────────────────
     print(f"\n  {'Method':<20} {'Mean T':>6} {'PSNR':>9} {'Oracle Gap':>10} {'Hit%':>6} {'rho':>5}")
     print(f"  {'-'*20} {'-'*6} {'-'*9} {'-'*10} {'-'*6} {'-'*5}")
 
@@ -318,7 +308,6 @@ def analyze(L=1, ckpt_dir=CHECKPOINT_DIR, test_dir=CLEAN_TEST_DIR, device=DEVICE
     print(f"  {'Oracle (upper bound)':<20} {np.mean(oracle_Ts):>6.2f} "
           f"{np.mean(oracle_psnrs):>9.4f} {'0.0000':>10} {'100.0%':>6} {'1.000':>5}")
 
-    # ── Von Neumann Stability ──────────────────────────────────────────────
     print(f"\n  Von Neumann stability analysis...")
     k_mag, spec_rad, stable, L_hat = compute_amplification_factor(model, img_size=64)
     frac_stable = stable.mean() * 100
@@ -326,7 +315,6 @@ def analyze(L=1, ckpt_dir=CHECKPOINT_DIR, test_dir=CLEAN_TEST_DIR, device=DEVICE
     print(f"  Stable freq. fraction: {frac_stable:.1f}%")
     print(f"  Max |lambda|: {max_spec:.4f}  (>1 => unstable)")
 
-    # ── Figures ──────────────────────────────────────────────────────────────
     fig, axes = plt.subplots(2, 3, figsize=(16, 10))
 
     # 1. Oracle T distribution
@@ -437,7 +425,6 @@ def analyze(L=1, ckpt_dir=CHECKPOINT_DIR, test_dir=CLEAN_TEST_DIR, device=DEVICE
     plt.close(fig)
     print(f"\n  Figure -> {path}")
 
-    # ── Mathematical summary ──────────────────────────────────────────────────
     print("\n" + "="*70)
     print("  MATHEMATICAL DERIVATION")
     print("="*70)
@@ -501,7 +488,6 @@ def analyze(L=1, ckpt_dir=CHECKPOINT_DIR, test_dir=CLEAN_TEST_DIR, device=DEVICE
   i.e., when diffusion operates too aggressively at high frequencies.
 """)
 
-    # ── Save JSON ──────────────────────────────────────────────────────────
     json_data = {
         "L": L, "T_max": T_max, "num_images": len(images),
         "oracle": {

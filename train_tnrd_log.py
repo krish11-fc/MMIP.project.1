@@ -23,6 +23,7 @@ from config import (
 )
 from models import TNRDLogNetwork
 from dataset import make_train_loader, make_val_loader
+from utils.losses import edge_preserving_loss
 
 _WARMUP_EPOCHS = 3
 SUFFIX = "_tnrdlog"
@@ -45,7 +46,8 @@ def _ssim255(pred, target):
     return float(sk_ssim(p.squeeze(), t.squeeze(), data_range=255.0))
 
 
-def train_one_epoch(model, loader, optimizer, device, active_stages):
+def train_one_epoch(model, loader, optimizer, device, active_stages,
+                    edge_weight=0.0):
     model.train()
     total_loss = 0.0
     for u_gt, f in loader:
@@ -53,13 +55,25 @@ def train_one_epoch(model, loader, optimizer, device, active_stages):
         f = f.to(device)
         optimizer.zero_grad()
 
-        # Forward in log domain
         z_gt = torch.log(1.0 + u_gt)
-        z = torch.log(1.0 + f)
         z_pred, _ = model(f, active_stages=active_stages)
+        u_pred = torch.exp(z_pred) - 1.0
 
-        # MSE loss in log domain
-        loss = nn.MSELoss()(z_pred, z_gt)
+        # Pixel-domain smooth L1 loss (Option B — robust)
+        loss = F.smooth_l1_loss(u_pred, u_gt)
+
+        # Edge loss
+        if edge_weight > 0:
+            loss = loss + edge_preserving_loss(u_pred, u_gt, weight=edge_weight)
+
+        # L1 filter regularization
+        from torch.nn import Module
+        reg = 0.0
+        for stage in model.modules():
+            if hasattr(stage, 'Ki') and isinstance(stage.Ki, torch.Tensor):
+                reg = reg + torch.abs(stage.Ki).mean()
+        loss = loss + 1e-4 * reg
+
         loss.backward()
         torch.nn.utils.clip_grad_norm_(
             [p for p in model.parameters() if p.requires_grad], max_norm=GRAD_CLIP)
@@ -88,7 +102,7 @@ def _set_lr(optimizer, lr):
 
 
 def train_stage(model, stage_idx, train_loader, val_loader, device,
-                num_epochs=NUM_EPOCHS, lr=LR, L=1,
+                num_epochs=NUM_EPOCHS, lr=LR, L=1, edge_weight=0.0,
                 save_dir=CHECKPOINT_DIR, plot_dir=PLOT_DIR):
     os.makedirs(save_dir, exist_ok=True)
     os.makedirs(plot_dir, exist_ok=True)
@@ -120,7 +134,8 @@ def train_stage(model, stage_idx, train_loader, val_loader, device,
         elif epoch == _WARMUP_EPOCHS + 1:
             _set_lr(optimizer, lr)
 
-        train_loss = train_one_epoch(model, train_loader, optimizer, device, active)
+        train_loss = train_one_epoch(model, train_loader, optimizer, device, active,
+                                       edge_weight=edge_weight)
         train_psnr_val = 10.0 * np.log10(255.0 ** 2 / max(train_loss, 1e-10))
         val_psnr_val, val_ssim_val = validate(model, val_loader, device, active)
 
@@ -174,7 +189,10 @@ def _find_resume_stage(L, num_stages, save_dir=CHECKPOINT_DIR):
 
 def train_greedy(L=1, num_stages=min(NUM_STAGES, 5), num_epochs=NUM_EPOCHS,
                  device=DEVICE, save_dir=CHECKPOINT_DIR, plot_dir=PLOT_DIR,
-                 num_workers=None, multi_gpu=True, resume=False):
+                 num_workers=None, multi_gpu=True, resume=False,
+                 edge_weight=0.0, multi_scale=False):
+    if multi_scale:
+        from models.multi_scale_wrapper import MultiScaleTNRDWrapper
     if num_workers is None:
         num_workers = DATALOADER_NUM_WORKERS
 
@@ -208,6 +226,10 @@ def train_greedy(L=1, num_stages=min(NUM_STAGES, 5), num_epochs=NUM_EPOCHS,
     else:
         model.print_param_summary()
 
+    if multi_scale:
+        model = MultiScaleTNRDWrapper(model)
+        print(f"  Multi-scale enabled: scales={model.scales}")
+
     if multi_gpu and device.type == "cuda" and torch.cuda.device_count() > 1:
         model = nn.DataParallel(model)
         print(f"  DataParallel across {torch.cuda.device_count()} GPUs")
@@ -223,6 +245,7 @@ def train_greedy(L=1, num_stages=min(NUM_STAGES, 5), num_epochs=NUM_EPOCHS,
     for stage_idx in range(start_stage, num_stages):
         hist = train_stage(model, stage_idx, train_loader, val_loader, device,
                            num_epochs=num_epochs, lr=LR, L=L,
+                           edge_weight=edge_weight,
                            save_dir=save_dir, plot_dir=plot_dir)
         all_history[f"stage_{stage_idx+1}"] = hist
 
@@ -254,6 +277,10 @@ def main():
                         help="Resume training from last checkpoint")
     parser.add_argument("--pipeline", action="store_true",
                         help="Run/resume all L values in sequence (1, 10)")
+    parser.add_argument("--edge-weight", type=float, default=0.0,
+                        help="Weight for gradient-magnitude edge loss (default 0)")
+    parser.add_argument("--multi-scale", action="store_true",
+                        help="Enable multi-scale processing (MSND-style)")
     args = parser.parse_args()
 
     device = DEVICE
@@ -262,22 +289,22 @@ def main():
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     os.makedirs(PLOT_DIR, exist_ok=True)
 
+    common = dict(
+        device=device, num_workers=args.workers,
+        multi_gpu=not args.no_multi_gpu, resume=args.resume,
+        edge_weight=args.edge_weight, multi_scale=args.multi_scale,
+    )
+
     if args.pipeline:
         stages_map = {1: 10, 10: 5}
         for L in [1, 10]:
             ns = min(stages_map.get(L, args.stages), NUM_STAGES)
-            train_greedy(L=L, num_stages=ns, num_epochs=args.epochs,
-                          device=device, num_workers=args.workers,
-                          multi_gpu=not args.no_multi_gpu, resume=True)
+            train_greedy(L=L, num_stages=ns, num_epochs=args.epochs, **common)
     elif args.both:
         for L in [1, 10]:
-            train_greedy(L=L, num_stages=args.stages, num_epochs=args.epochs,
-                          device=device, num_workers=args.workers,
-                          multi_gpu=not args.no_multi_gpu, resume=args.resume)
+            train_greedy(L=L, num_stages=args.stages, num_epochs=args.epochs, **common)
     else:
-        train_greedy(L=args.L, num_stages=args.stages, num_epochs=args.epochs,
-                      device=device, num_workers=args.workers,
-                      multi_gpu=not args.no_multi_gpu, resume=args.resume)
+        train_greedy(L=args.L, num_stages=args.stages, num_epochs=args.epochs, **common)
 
 
 if __name__ == "__main__":
