@@ -11,8 +11,9 @@ import matplotlib.pyplot as plt
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import DEVICE, CHECKPOINT_DIR, CLEAN_TEST_DIR, NUM_FILTERS, FILTER_SIZE
-from config import GAMMA_INERTIA, SIGMA_SMOOTH, NU, K, RBF_NUM_CENTERS
+from config import GAMMA_INERTIA, SIGMA_SMOOTH, NU, K, RBF_NUM_CENTERS, EMBED_DIM, NUM_NOISE_LEVELS
 from models.network import InertialTNRDNetwork
+from models.noise_conditional_network_v2 import NoiseConditionalTNRDNetworkV2
 from utils.noise import add_gamma_noise
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs", "paper_figures")
@@ -79,23 +80,77 @@ for L in [1, 10]:
         noisy = add_gamma_noise(clean.clone(), L).clip(0, 255)
         with torch.no_grad():
             _, stages = model(noisy.to(device))
-        n_cols = ns + 2
-        fig, axes = plt.subplots(1, n_cols, figsize=(4 * n_cols, 4))
-        axes[0].imshow(noisy.cpu().squeeze(), cmap="gray", vmin=0, vmax=255)
-        axes[0].set_title(f"Noisy", fontsize=9)
-        axes[0].axis("off")
+        n_cols = 6
+        total = ns + 2
+        n_rows = (total + n_cols - 1) // n_cols
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 4 * n_rows))
+        axes = axes.flatten()
+        panels = [("Noisy", noisy.cpu().squeeze(), None)]
         for t in range(ns):
             stg = stages[t].cpu().squeeze().numpy()
             ps = 10 * np.log10(255**2 / np.mean((stg - img)**2 + 1e-10))
-            axes[t + 1].imshow(stg, cmap="gray", vmin=0, vmax=255)
-            axes[t + 1].set_title(f"Stage {t+1}\n{ps:.1f} dB", fontsize=8)
-            axes[t + 1].axis("off")
-        axes[ns + 1].imshow(img, cmap="gray", vmin=0, vmax=255)
-        axes[ns + 1].set_title("Ground Truth", fontsize=9)
-        axes[ns + 1].axis("off")
+            panels.append((f"Stage {t+1}\n{ps:.1f} dB", stg, None))
+        panels.append(("Ground Truth", img, None))
+        for i, (title, im, _) in enumerate(panels):
+            axes[i].imshow(im, cmap="gray", vmin=0, vmax=255)
+            axes[i].set_title(title, fontsize=9)
+            axes[i].axis("off")
+        for i in range(total, len(axes)):
+            axes[i].set_visible(False)
         fig.suptitle(f"{names[idx]} — L={L} ({ns} stages)", fontsize=14)
         plt.tight_layout()
         fname = os.path.join(OUT, f"{names[idx]}_L{L}_stages.png")
+        fig.savefig(fname, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  Saved {fname}")
+    torch.cuda.empty_cache()
+
+# ── 2b. NCTDN-v2 Stage progression (first 3 images, L=1 and L=10) ────────
+print("\n" + "=" * 60)
+print("2b. NCTDN-v2 Stage progression")
+OUT_V2 = os.path.join(OUT, "nctdn_v2")
+os.makedirs(OUT_V2, exist_ok=True)
+for L in [1, 10]:
+    ckpt_path = os.path.join(CHECKPOINT_DIR, "nctdn_v2_model_mixed_final.pth")
+    if not os.path.exists(ckpt_path):
+        print(f"  SKIP: NCTDN-v2 checkpoint not found for L={L}")
+        continue
+    nctdn = NoiseConditionalTNRDNetworkV2(
+        num_stages=10, num_filters=NUM_FILTERS, filter_size=FILTER_SIZE,
+        gamma_inertia=GAMMA_INERTIA, sigma_smooth=SIGMA_SMOOTH, nu=NU,
+        K_thresh=K, num_centers=RBF_NUM_CENTERS, use_g_func=True,
+        embed_dim=EMBED_DIM, num_noise_levels=NUM_NOISE_LEVELS, device=device,
+    ).to(device)
+    nctdn.load_state_dict(torch.load(ckpt_path, map_location="cpu"))
+    nctdn.eval()
+    ns = 10
+    for idx in range(min(3, len(test_paths))):
+        path = test_paths[idx]
+        img = np.array(Image.open(path).convert("L"), dtype=np.float32)
+        clean = torch.from_numpy(img).unsqueeze(0).unsqueeze(0)
+        noisy = add_gamma_noise(clean.clone(), L).clip(0, 255)
+        with torch.no_grad():
+            _, stages = nctdn(noisy.to(device), L=L)
+        n_cols = 6
+        total = ns + 2
+        n_rows = (total + n_cols - 1) // n_cols
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 4 * n_rows))
+        axes = axes.flatten()
+        panels = [("Noisy", noisy.cpu().squeeze(), None)]
+        for t in range(ns):
+            stg = stages[t].cpu().squeeze().numpy()
+            ps = 10 * np.log10(255**2 / np.mean((stg - img)**2 + 1e-10))
+            panels.append((f"Stage {t+1}\n{ps:.1f} dB", stg, None))
+        panels.append(("Ground Truth", img, None))
+        for i, (title, im, _) in enumerate(panels):
+            axes[i].imshow(im, cmap="gray", vmin=0, vmax=255)
+            axes[i].set_title(title, fontsize=9)
+            axes[i].axis("off")
+        for i in range(total, len(axes)):
+            axes[i].set_visible(False)
+        fig.suptitle(f"NCTDN-v2: {names[idx]} — L={L} ({ns} stages)", fontsize=14)
+        plt.tight_layout()
+        fname = os.path.join(OUT_V2, f"{names[idx]}_L{L}_stages.png")
         fig.savefig(fname, dpi=200, bbox_inches="tight")
         plt.close(fig)
         print(f"  Saved {fname}")

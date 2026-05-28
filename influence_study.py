@@ -96,7 +96,7 @@ def plot_influence_functions_per_stage(model, L, save_dir, n_filters=8):
     c_edge = (1.0 / (1.0 + (s / K) ** 2)).detach().cpu().numpy()
 
     T = len(model.stages)
-    ncols = min(4, T)
+    ncols = 5
     nrows = (T + ncols - 1) // ncols
 
     fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4 * nrows))
